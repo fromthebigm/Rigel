@@ -20,6 +20,38 @@ _ACTIVE_STAR: list = ["Rigel"]
 _REGISTRY_LOCK = threading.Lock()
 
 
+def _save_and_clear_system_proxies():
+    saved = {}
+    try:
+        import SystemConfiguration as SC
+        store = SC.SCDynamicStoreCreate(None, "Rigel", None, None)
+        proxies = SC.SCDynamicStoreCopyProxies(store)
+        if proxies:
+            saved = dict(proxies)
+        SC.SCDynamicStoreSetValue(store, "State:/Network/Global/Proxies", {
+            'HTTPEnable': 0,
+            'HTTPSEnable': 0,
+            'SOCKSEnable': 0,
+            'ProxyAutoConfigEnable': 0,
+            'ProxyAutoDiscoveryEnable': 0,
+        })
+        print("[Rigel] System proxies cleared via SCDynamicStore")
+    except Exception as e:
+        print(f"[Rigel] SCDynamicStore proxy clear failed: {e}")
+    return saved
+
+
+def _restore_system_proxies(saved: dict):
+    if not saved:
+        return
+    try:
+        import SystemConfiguration as SC
+        store = SC.SCDynamicStoreCreate(None, "Rigel", None, None)
+        SC.SCDynamicStoreSetValue(store, "State:/Network/Global/Proxies", saved)
+        print("[Rigel] System proxies restored")
+    except Exception as e:
+        print(f"[Rigel] SCDynamicStore proxy restore failed: {e}")
+
 def _switch_to_star(name: str):
     with _REGISTRY_LOCK:
         prev = _ACTIVE_STAR[0]
@@ -167,13 +199,19 @@ def main():
     args, _ = parser.parse_known_args()
     proxy = args.proxy_server.strip()
 
+    # ── Clear all env proxy vars ───────────────────────────────────────────────
     for _v in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY",
-               "ALL_PROXY", "all_proxy", "FTP_PROXY", "ftp_proxy"):
+               "ALL_PROXY", "all_proxy", "FTP_PROXY", "ftp_proxy",
+               "auto_proxy_url", "AUTO_PROXY_URL"):
         os.environ.pop(_v, None)
 
+    # ── Apply proxy setting ────────────────────────────────────────────────────
+    saved_proxies = {}
     if not proxy or proxy == "direct://":
         os.environ["no_proxy"] = "*"
         os.environ["NO_PROXY"] = "*"
+        # Attempt to clear system proxies via CFNetwork
+        saved_proxies = _save_and_clear_system_proxies()
     else:
         if not proxy.startswith(("http://", "https://", "socks4://", "socks5://")):
             proxy = "http://" + proxy
@@ -205,9 +243,14 @@ def main():
         except: pass
         _notify_all_switchers()
     threading.Timer(1.4, _initial_nav).start()
-    os.environ['auto_proxy_url'] = 'file:///Users/daniyalkhan/Desktop/pyt/proxy.pac'
-    os.environ['AUTO_PROXY_URL'] = 'file:///Users/daniyalkhan/Desktop/pyt/proxy.pac'
-    wv.start(debug=False, storage_path=STORAGE_PATH)
+
+    try:
+        wv.start(debug=False, storage_path=STORAGE_PATH)
+    finally:
+        # Always restore system proxies on exit
+        if saved_proxies:
+            _restore_system_proxies(saved_proxies)
+
 
 if __name__ == "__main__":
     main()
