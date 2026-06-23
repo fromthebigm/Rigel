@@ -14,17 +14,7 @@ Set your path to the rigel dist folder:
 cd "Replace this quotation with your rigel dist folder"
 ```
 
-First Option: Run the standalone WKWebView build: (However I recommend using the second option)
-
-```
-./jdk/Contents/Home/bin/java -XstartOnFirstThread -jar ./rigel-wk-fat.jar
-```
-
-That's it.
-
-> `-XstartOnFirstThread` is required on macOS for SWT.
-
-Second option: The original SWT renderer remains available only as an explicit override;
+The original SWT renderer remains available only as an explicit override;
 normal launches never silently downgrade from WKWebView:
 
 ```
