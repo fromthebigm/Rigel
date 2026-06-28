@@ -18,8 +18,7 @@ The original SWT renderer remains available only as an explicit override;
 normal launches never silently downgrade from WKWebView:
 
 ```
-./jdk/Contents/Home/bin/java -XstartOnFirstThread -Drigel.browser.backend=swt -jar ./rigel-wk-fat.jar
-```
+./jdk/Contents/Home/bin/java -XstartOnFirstThread -jar rigel-wk-fat.jar```
 
 ## Features
 
