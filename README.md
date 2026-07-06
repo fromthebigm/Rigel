@@ -63,7 +63,7 @@ Normal launches use WKWebView and do not silently downgrade.
 
 ## Stored data
 
-Rigel stores user data in `~/.rigel/`.
+Rigel stores user data in the rigel folder, history is saved but signed in accounts, cookies and caches are saved in library webkit folder
 
 | File | Contents |
 |---|---|
