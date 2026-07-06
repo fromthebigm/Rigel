@@ -1,42 +1,41 @@
-# Rigel (Java version)
+# Rigel
 
-A lightweight macOS desktop browser with an SWT interface, Apple's modern
-`WKWebView` renderer, and a built-in local proxy.
+Rigel is a lightweight macOS desktop browser built with a Java/SWT interface,
+Apple's modern `WKWebView` renderer, and a built-in local proxy.
 
-## Running
+## Running Rigel
 
-Ensure you have a terminal (or VS Code). Download the latest `Rigel Dist` zip
-from the releases.
+Download and unzip the latest `Rigel Dist` release, then open Terminal and
+enter the distribution folder:
 
-Set your path to the rigel dist folder:
-
-```
-cd "Replace this quotation with your rigel dist folder"
+```bash
+cd "replace this with your Rigel dist folder"
 ```
 
-The original SWT renderer remains available only as an explicit override;
-normal launches never silently downgrade from WKWebView:
+Launch Rigel with the  command directly:
 
+```bash
+./jdk/Contents/Home/bin/java -XstartOnFirstThread -cp "./target/rigel.jar:./lib/*" RigelApp
 ```
-./jdk/Contents/Home/bin/java -XstartOnFirstThread -jar rigel-wk-fat.jar
-```
+
+The original SWT renderer is still available only as an explicit override.
+Normal launches use WKWebView and do not silently downgrade.
 
 ## Features
 
-- **Tabbed browsing** with two layouts: a combined top bar (Chrome/Arc style)
-  or a vertical sidebar. Toggle with `Cmd+Shift+S` or in Settings.
-- **Multiple windows** with `Cmd+N`; windows share settings, history,
-  bookmarks, WebKit resources, and the single LittleProxy instance.
-- **Persistent settings** stored in `~/.rigel/` (see below). Your layout,
-  homepage, search engine, proxy, zoom, and toggles survive restarts.
-- **Downloads** to a configurable folder, with an optional save-as prompt.
-- **Bookmarks** (`Cmd+D` to toggle the current page).
-- **History** of visited pages.
-- **Find in page** (`Cmd+F`).
-- **Zoom** (`Cmd +`, `Cmd -`, `Cmd 0`).
-- **Configurable search engine** (any URL template with `%s` for the query).
-- **Optional ad/tracker blocklist** — off by default, toggle in Settings.
-- **Upstream proxy** support, with automatic direct routing for `localhost`.
+- Tabbed browsing with either a combined top bar or a vertical sidebar.
+- Multiple windows with `Cmd+N`.
+- Shared settings, history, bookmarks, WebKit resources, and one LittleProxy
+  instance across all windows.
+- Persistent settings stored in `~/.rigel/`.
+- Downloads to a configurable folder, with an optional save-as prompt.
+- Bookmarks with `Cmd+D`.
+- History of visited pages.
+- Find in page with `Cmd+F`.
+- Zoom controls with `Cmd +`, `Cmd -`, and `Cmd 0`.
+- Configurable search engine using any URL template with `%s` for the query.
+- Optional host-based ad/tracker blocklist, disabled by default.
+- Upstream proxy support, with automatic direct routing for `localhost`.
 
 ## Keyboard shortcuts
 
@@ -47,39 +46,60 @@ normal launches never silently downgrade from WKWebView:
 | `Cmd+W` | Close tab |
 | `Cmd+Shift+W` | Close window |
 | `Cmd+L` | Focus address bar |
+| `Cmd+X` | Cut |
+| `Cmd+C` | Copy |
+| `Cmd+V` | Paste |
+| `Cmd+A` | Select all |
 | `Cmd+R` | Reload |
 | `Cmd+H` | Home |
 | `Cmd+F` | Find in page |
 | `Cmd+D` | Bookmark current page |
-| `Cmd +/-/0` | Zoom in / out / reset |
+| `Cmd +` | Zoom in |
+| `Cmd -` | Zoom out |
+| `Cmd 0` | Reset zoom |
 | `Cmd+Shift+S` | Toggle sidebar / top-bar layout |
 | `F11` | Toggle fullscreen |
 | `Esc` | Exit fullscreen / close find bar |
 
-## Stored data (`~/.rigel/`)
+## Stored data
+
+Rigel stores user data in `~/.rigel/`.
 
 | File | Contents |
 |---|---|
-| `settings.properties` | All preferences (homepage, layout, search, proxy, zoom, toggles) |
-| `bookmarks.tsv` | Saved bookmarks (`title<TAB>url`) |
-| `history.tsv` | Visited pages (`epochMillis<TAB>title<TAB>url`), capped at 2000 |
+| `settings.properties` | Preferences such as homepage, layout, search engine, proxy, zoom, and toggles |
+| `bookmarks.tsv` | Saved bookmarks in `title<TAB>url` format |
+| `history.tsv` | Visited pages in `epochMillis<TAB>title<TAB>url` format, capped at 2000 entries |
 
-These are plain text and safe to edit or delete; defaults are restored if a
-file is missing.
+These files are plain text. They are safe to edit or delete; Rigel restores
+defaults when a file is missing.
 
 ## Notes and known limitations
 
-- **Fullscreen video is emulated.** Embedded web views are not always treated as a
-  top-level browsing context, so the W3C Fullscreen API (`requestFullscreen()`)
-  is always rejected by the engine. Rigel works around this by mocking the
-  Fullscreen API in JavaScript and maximizing the OS window, which makes
-  players (YouTube, Twitch, etc.) present fullscreen. This is the only viable
-  approach in this embed; behavior can vary slightly by site.
-- **The ad/tracker blocklist is host-based.** It checks ordinary HTTP requests
-  and HTTPS `CONNECT` tunnels, but cannot distinguish individual paths inside
-  an encrypted HTTPS tunnel. The feature is conservative and disabled by default.
-- **Local proxy** listens on `127.0.0.1:8888`, and WKWebView traffic is always
-  routed through it on macOS 14 or newer. The optional host/port fields in
-  Settings configure a separate upstream proxy; leave them blank for
-  LittleProxy to connect to sites directly. `localhost`/`127.0.0.1` always
-  connect directly beyond the local hop.
+### Fullscreen video
+
+Fullscreen video is emulated. Embedded web views are not always treated as a
+top-level browsing context, so the engine may reject the W3C Fullscreen API
+(`requestFullscreen()`).
+
+Rigel works around this by mocking the Fullscreen API in JavaScript and
+maximizing the OS window. This makes players such as YouTube and Twitch present
+fullscreen, but behavior can vary slightly by site.
+
+### Ad/tracker blocklist
+
+The ad/tracker blocklist is host-based. It checks ordinary HTTP requests and
+HTTPS `CONNECT` tunnels, but it cannot distinguish individual paths inside an
+encrypted HTTPS tunnel.
+
+The feature is conservative and disabled by default.
+
+### Local proxy
+
+Rigel's local proxy listens on `127.0.0.1:8888`. On macOS 14 or newer, WKWebView
+traffic is routed through it.
+
+The optional host and port fields in Settings configure a separate upstream
+proxy. Leave them blank for LittleProxy to connect to sites directly.
+
+`localhost` and `127.0.0.1` always connect directly beyond the local proxy hop.
