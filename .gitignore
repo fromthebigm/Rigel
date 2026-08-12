@@ -1,0 +1,25 @@
+# Personal browser state. Never commit cookies, signed-in sessions, history,
+# bookmarks, preferences, caches, downloads, or WebKit website databases.
+/portable-data/
+
+# Local/generated build output.
+/build/
+/classes/
+/target/
+/.codex-proxy-routing-test/
+/dock_identity.dylib
+*.class
+*.dylib
+*.log
+hs_err_pid*
+
+# The bundled JDK is a local distribution dependency (hundreds of MB), not
+# project source. A checkout can use JAVA_HOME or a system JDK instead.
+/jdk/
+
+# OS/editor metadata and transient atomic-write files.
+.DS_Store
+.idea/
+.vscode/
+*.tmp
+*~
