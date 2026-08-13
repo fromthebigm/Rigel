@@ -1,0 +1,30 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>AUTH POPUP WAITING</title>
+<style>
+  body { font: 20px system-ui; padding: 48px; background: #151515; color: white; }
+  button { font: inherit; padding: 12px 20px; }
+  .pass { color: #70e090; }
+  .fail { color: #ff6b6b; }
+</style>
+<h1 id="status">Waiting for authentication popup…</h1>
+<button id="login">Sign in with test provider</button>
+<script>
+  const status = document.querySelector('#status');
+  let popup;
+  addEventListener('message', event => {
+    if (event.origin !== 'http://localhost:8765' || event.source !== popup || event.data !== 'rigel-auth-pass') return;
+    document.title = 'AUTH POPUP PASS';
+    status.textContent = 'PASS: opener and postMessage were preserved.';
+    status.className = 'pass';
+  });
+  document.querySelector('#login').addEventListener('click', () => {
+    popup = open('http://localhost:8765/popup.html', 'rigel-auth', 'width=620,height=430');
+    if (!popup) {
+      document.title = 'AUTH POPUP FAIL';
+      status.textContent = 'FAIL: popup was blocked.';
+      status.className = 'fail';
+    }
+  });
+  setTimeout(() => document.querySelector('#login').click(), 500);
+</script>

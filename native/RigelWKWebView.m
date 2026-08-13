@@ -77,6 +77,26 @@ static NSString *BridgeScript(void) {
         "})();";
 }
 
+static NSString *LoginDiagnosticsScript(void) {
+    return @"(function(){"
+        "if(window.__rigelLoginDiagnostics||!/(^|\\.)music\\.apple\\.com$/i.test(location.hostname))return;"
+        "window.__rigelLoginDiagnostics=1;"
+        "var tries=0,clicked=false,h=window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.rigelDiagnostics;"
+        "function send(v){try{h&&h.postMessage(JSON.stringify(v))}catch(e){}}"
+        "function run(){"
+          "tries++;"
+          "var all=Array.from(document.querySelectorAll('button,a,[role=button]'));"
+          "var target=all.find(function(e){return String(e.innerText||e.textContent||'').replace(/\\s+/g,' ').trim().toLowerCase()==='sign in'});"
+          "if(!target){if(tries<120)setTimeout(run,250);else send({event:'sign-in-missing',url:location.href});return}"
+          "var r=target.getBoundingClientRect(),s=getComputedStyle(target),x=r.left+r.width/2,y=r.top+r.height/2,hit=document.elementFromPoint(x,y);"
+          "var nav=performance.getEntriesByType('navigation')[0];"
+          "send({event:'sign-in-found',url:location.href,tries:tries,timeMs:Math.round(performance.now()),loadEventMs:nav&&Math.round(nav.loadEventEnd)||0,resources:performance.getEntriesByType('resource').length,tag:target.tagName,disabled:!!target.disabled,rect:{x:r.x,y:r.y,w:r.width,h:r.height},display:s.display,visibility:s.visibility,pointerEvents:s.pointerEvents,opacity:s.opacity,hitTag:hit&&hit.tagName||'',hitText:String(hit&&(hit.innerText||hit.textContent)||'').replace(/\\s+/g,' ').trim().slice(0,80)});"
+          "if(!clicked){clicked=true;target.click();send({event:'sign-in-click-dispatched'});}"
+        "}"
+        "if(document.readyState==='loading')addEventListener('DOMContentLoaded',run,{once:true});else run();"
+    "})();";
+}
+
 static NSString *MediaTraceScript(BOOL normalizeAllSites) {
     NSString *prefix = normalizeAllSites
         ? @"window.__rigelAv1NormalizeAll=true;"
@@ -354,6 +374,13 @@ static NSString *TikTokNetworkDiagnosticsScript(void) {
     return YES;
 }
 
+- (BOOL)acceptsFirstMouse:(NSEvent *)event {
+    // Login controls should respond to the click that activates a Rigel
+    // window. Without this AppKit can consume the first click solely to make
+    // the window key, which looks like Apple Music's Sign In button is dead.
+    return YES;
+}
+
 - (void)mouseDown:(NSEvent *)event {
     [self rigelRecordTrustedInput];
     [super mouseDown:event];
@@ -586,12 +613,6 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
     return webView != nil && webView != _webView && [_pendingPopups containsObject:webView];
 }
 
-- (BOOL)isBlankURL:(NSURL *)url {
-    if (url == nil) return YES;
-    NSString *absolute = url.absoluteString.lowercaseString ?: @"";
-    return absolute.length == 0 || [absolute isEqualToString:@"about:blank"];
-}
-
 - (void)closePendingPopup:(WKWebView *)popup {
     if (popup == nil) return;
     [popup stopLoading];
@@ -613,7 +634,8 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
 
 - (WKWebView *)createPopupWebViewWithConfiguration:(WKWebViewConfiguration *)configuration {
     NSRect frame = NSMakeRect(0, 0, 1050, 720);
-    WKWebView *popup = [[WKWebView alloc] initWithFrame:frame configuration:configuration];
+    WKWebView *popup = [[RigelWKNativeView alloc] initWithFrame:frame
+                                                  configuration:configuration];
     popup.navigationDelegate = self;
     popup.UIDelegate = self;
     popup.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
@@ -642,7 +664,22 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
     if (_popupWindows == nil) _popupWindows = [NSMapTable strongToStrongObjectsMapTable];
     [_pendingPopups addObject:popup];
     [_popupWindows setObject:window forKey:popup];
+    if (getenv("RIGEL_LOGIN_DIAGNOSTICS") != NULL)
+        NSLog(@"[Rigel login diagnostics] popup created");
     return popup;
+}
+
+- (NSWindow *)popupWindowForWebView:(WKWebView *)webView {
+    return webView == nil ? nil : [_popupWindows objectForKey:webView];
+}
+
+- (void)updatePopupWindowForWebView:(WKWebView *)webView loading:(BOOL)loading {
+    NSWindow *window = [self popupWindowForWebView:webView];
+    if (window == nil) return;
+    NSString *title = webView.title;
+    if (title.length == 0) title = webView.URL.host;
+    if (title.length == 0) title = loading ? @"Loading…" : @"Rigel";
+    window.title = title;
 }
 
 - (void)windowWillClose:(NSNotification *)notification {
@@ -660,13 +697,6 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
     [closingPopup stopLoading];
     [_pendingPopups removeObject:closingPopup];
     [_popupWindows removeObjectForKey:closingPopup];
-}
-
-- (void)openExternalTab:(NSURL *)url {
-    if (_scriptCallback == NULL || url == nil) return;
-    NSString *absolute = url.absoluteString;
-    if (absolute.length == 0) return;
-    _scriptCallback(_token, "rigelOpen", Utf8(EncodeMessagePart(absolute)));
 }
 
 - (void)downloadURL:(NSURL *)url {
@@ -720,15 +750,38 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
 }
 
 - (void)webView:(WKWebView *)webView didStartProvisionalNavigation:(WKNavigation *)navigation {
+    if ([self isPendingPopup:webView]) {
+        [self updatePopupWindowForWebView:webView loading:YES];
+        return;
+    }
     [self emit:RIGEL_WK_EVENT_LOAD_STARTED
           first:webView.URL.absoluteString ?: @"" second:@""];
 }
 
 - (void)webView:(WKWebView *)webView didCommitNavigation:(WKNavigation *)navigation {
+    if ([self isPendingPopup:webView]) {
+        [self updatePopupWindowForWebView:webView loading:YES];
+        return;
+    }
     [self emitLocationForWebView:webView];
 }
 
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
+    if ([self isPendingPopup:webView]) {
+        [self updatePopupWindowForWebView:webView loading:NO];
+        __weak RigelWKController *weakSelf = self;
+        __weak WKWebView *weakWebView = webView;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(100 * NSEC_PER_MSEC)),
+                       dispatch_get_main_queue(), ^{
+            RigelWKController *strongSelf = weakSelf;
+            WKWebView *strongWebView = weakWebView;
+            if (strongSelf != nil && strongWebView != nil)
+                [strongSelf updatePopupWindowForWebView:strongWebView loading:NO];
+        });
+        if (getenv("RIGEL_LOGIN_DIAGNOSTICS") != NULL)
+            NSLog(@"[Rigel login diagnostics] popup loaded %@", webView.URL.absoluteString ?: @"");
+        return;
+    }
     [self emitLocationForWebView:webView];
     [self emit:RIGEL_WK_EVENT_LOAD_FINISHED
           first:webView.URL.absoluteString ?: @""
@@ -739,6 +792,11 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
 - (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)navigation
       withError:(NSError *)error {
     if ([error.domain isEqualToString:NSURLErrorDomain] && error.code == NSURLErrorCancelled) return;
+    if ([self isPendingPopup:webView]) {
+        [self updatePopupWindowForWebView:webView loading:NO];
+        NSLog(@"[Rigel] Popup navigation failed: %@", error.localizedDescription);
+        return;
+    }
     [self emit:RIGEL_WK_EVENT_LOAD_FAILED
           first:webView.URL.absoluteString ?: @""
          second:error.localizedDescription ?: @"Navigation failed"];
@@ -747,12 +805,22 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
 - (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation
       withError:(NSError *)error {
     if ([error.domain isEqualToString:NSURLErrorDomain] && error.code == NSURLErrorCancelled) return;
+    if ([self isPendingPopup:webView]) {
+        [self updatePopupWindowForWebView:webView loading:NO];
+        NSLog(@"[Rigel] Popup provisional navigation failed: %@", error.localizedDescription);
+        return;
+    }
     [self emit:RIGEL_WK_EVENT_LOAD_FAILED
           first:webView.URL.absoluteString ?: @""
          second:error.localizedDescription ?: @"Navigation failed"];
 }
 
 - (void)webViewWebContentProcessDidTerminate:(WKWebView *)webView {
+    if ([self isPendingPopup:webView]) {
+        [self updatePopupWindowForWebView:webView loading:YES];
+        [webView reload];
+        return;
+    }
     [self emit:RIGEL_WK_EVENT_PROCESS_RESTARTED
           first:webView.URL.absoluteString ?: @"" second:@""];
     [webView reload];
@@ -762,12 +830,11 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
     decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction
                     decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
     if ([self isPendingPopup:webView]) {
-        NSURL *url = navigationAction.request.URL;
-        if (![self shouldAllowNavigationToURL:url]) {
-            [self closePendingPopup:webView];
-            decisionHandler(WKNavigationActionPolicyCancel);
-            return;
-        }
+        // Keep popup navigation inside the exact WKWebView WebKit created for
+        // it. OAuth and Apple Music use window.opener/postMessage while the
+        // popup crosses several authentication origins. Running the main-tab
+        // policy callback here both corrupts its progress state and breaks the
+        // opener relationship when the URL is recreated elsewhere.
         decisionHandler(WKNavigationActionPolicyAllow);
         return;
     }
@@ -782,13 +849,10 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
         }
     }
     if (navigationAction.targetFrame == nil && navigationAction.request.URL != nil) {
-        if ([self isBlankURL:navigationAction.request.URL]) {
-            decisionHandler(WKNavigationActionPolicyAllow);
-            return;
-        }
-        NSURL *url = navigationAction.request.URL;
-        decisionHandler(WKNavigationActionPolicyCancel);
-        dispatch_async(dispatch_get_main_queue(), ^{ [self openExternalTab:url]; });
+        // Let WKUIDelegate create the requested web view with WebKit's supplied
+        // configuration. Replacing this with an unrelated Rigel tab loses the
+        // opener, transient user activation, cookies, and OAuth callbacks.
+        decisionHandler(WKNavigationActionPolicyAllow);
         return;
     }
     if (navigationAction.targetFrame != nil && !navigationAction.targetFrame.mainFrame) {
@@ -953,14 +1017,21 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
 
     NSString *name = message.name ?: @"";
     if ([name isEqualToString:@"rigelDiagnostics"]
-            && getenv("RIGEL_TIKTOK_DIAGNOSTICS") != NULL) {
+            && (getenv("RIGEL_TIKTOK_DIAGNOSTICS") != NULL
+                || getenv("RIGEL_LOGIN_DIAGNOSTICS") != NULL)) {
         if ([message.body isKindOfClass:[NSString class]])
-            NSLog(@"[Rigel TikTok network] %@", (NSString *)message.body);
+            NSLog(@"[Rigel diagnostics] %@", (NSString *)message.body);
         return;
     }
     if (_scriptCallback == NULL) return;
     if ([name isEqualToString:@"rigelEvent"]) {
-        [self emitLocationForWebView:_webView];
+        if ([message.body isKindOfClass:[NSString class]]) {
+            NSString *payload = (NSString *)message.body;
+            if (payload.length <= (64u * 1024u))
+                _scriptCallback(_token, "rigelEvent", Utf8(payload));
+        } else {
+            [self emitLocationForWebView:_webView];
+        }
         return;
     }
     if (![message.body isKindOfClass:[NSString class]]) return;
@@ -1129,12 +1200,26 @@ static void InstallUserScripts(WKUserContentController *controller, BOOL normali
             injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES];
         [controller addUserScript:tiktokDiagnostics];
     }
+    if (getenv("RIGEL_LOGIN_DIAGNOSTICS") != NULL) {
+        WKUserScript *loginDiagnostics = [[WKUserScript alloc]
+            initWithSource:LoginDiagnosticsScript()
+            injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES];
+        [controller addUserScript:loginDiagnostics];
+    }
 }
 
 
 static void ConfigureProxy(WKWebsiteDataStore *dataStore, int proxyPort, int proxyMode) {
     if (@available(macOS 14.0, *)) {
+        static WKWebsiteDataStore *configuredStore;
+        static int configuredPort = INT_MIN;
+        static int configuredMode = INT_MIN;
         @synchronized(dataStore) {
+            // The default data store is shared by every Rigel tab. Reassigning
+            // the same proxyConfigurations array for every new WKWebView can
+            // synchronously restart WebKit networking and stall page startup.
+            if (configuredStore == dataStore && configuredPort == proxyPort
+                    && configuredMode == proxyMode) return;
             if (proxyPort > 0 && proxyMode != RIGEL_WK_PROXY_DIRECT) {
                 NSString *port = [NSString stringWithFormat:@"%d", proxyPort];
                 nw_endpoint_t endpoint = nw_endpoint_create_host("127.0.0.1", port.UTF8String);
@@ -1146,6 +1231,9 @@ static void ConfigureProxy(WKWebsiteDataStore *dataStore, int proxyPort, int pro
             } else {
                 dataStore.proxyConfigurations = @[];
             }
+            configuredStore = dataStore;
+            configuredPort = proxyPort;
+            configuredMode = proxyMode;
         }
     }
 }

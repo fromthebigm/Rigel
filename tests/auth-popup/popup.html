@@ -1,0 +1,12 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Test Provider Sign In</title>
+<style>
+  body { font: 20px system-ui; padding: 48px; background: #202020; color: white; }
+  strong { color: #70e090; }
+</style>
+<h1>Test provider</h1>
+<p><strong>Popup loaded.</strong> Sending the authentication result to its opener.</p>
+<script>
+  if (opener) opener.postMessage('rigel-auth-pass', 'http://127.0.0.1:8765');
+</script>
