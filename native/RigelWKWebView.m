@@ -395,6 +395,15 @@ static NSString *TikTokNetworkDiagnosticsScript(void) {
 
 - (void)mouseDown:(NSEvent *)event {
     [self rigelRecordTrustedInput];
+    // A terminal-launched SWT process can own a visible/main NSWindow without
+    // becoming the active application. In that state the window stays non-key
+    // even after a click and WebKit intentionally withholds DOM mouse events.
+    // Activate only in response to a real click inside this web view, then make
+    // its window key before handing the original NSEvent to WebKit.
+    if (self.window != nil && !self.window.isKeyWindow) {
+        if (!NSApp.isActive) [NSApp activateIgnoringOtherApps:YES];
+        [self.window makeKeyAndOrderFront:nil];
+    }
     [super mouseDown:event];
 }
 
@@ -1654,8 +1663,17 @@ void rigel_wk_set_frame(void *handle, double x, double y, double width, double h
 __attribute__((visibility("default")))
 void rigel_wk_focus(void *handle) {
     WKWebView *view = Controller(handle).webView;
-    [view.window makeKeyWindow];
+    if (view == nil || view.window == nil) return;
+    BOOL wasActive = NSApp.isActive;
+    BOOL wasKey = view.window.isKeyWindow;
+    if (!NSApp.isActive) [NSApp activateIgnoringOtherApps:YES];
+    [view.window makeKeyAndOrderFront:nil];
     [view.window makeFirstResponder:view];
+    if (getenv("RIGEL_LOGIN_DIAGNOSTICS") != NULL)
+        NSLog(@"[Rigel login diagnostics] native-focus active=%d->%d key=%d->%d main=%d firstResponder=%@",
+              wasActive, NSApp.isActive, wasKey, view.window.isKeyWindow,
+              view.window.isMainWindow,
+              view.window.firstResponder == nil ? @"nil" : NSStringFromClass(view.window.firstResponder.class));
 }
 
 __attribute__((visibility("default")))

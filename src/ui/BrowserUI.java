@@ -333,6 +333,13 @@ public class BrowserUI {
             closed.run();
         });
         shell.open();
+        // A command-line Java/SWT launch may show the shell without activating
+        // the application. WKWebView then receives native NSEvents in a non-key
+        // window but correctly withholds them from the page. Finish the normal
+        // window-opening path by activating the shell and its web content.
+        shell.forceActive();
+        tabManager.setAppActive(true);
+        tabManager.focusActiveBrowser();
         MacWindowCaptureProtection.install(shell);
     }
 
