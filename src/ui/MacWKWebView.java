@@ -246,8 +246,15 @@ final class MacWKWebView extends Composite {
     }
 
     @Override public boolean setFocus() {
-        if (usable()) bridge().rigel_wk_focus(handle);
-        return super.setFocus();
+        // SWT must focus its host Composite first. The final first responder
+        // then has to be WKWebView; doing these in the opposite order lets
+        // SWT immediately steal focus back from webpage inputs and dialogs.
+        boolean focused = super.setFocus();
+        if (usable()) {
+            bridge().rigel_wk_focus(handle);
+            return true;
+        }
+        return focused;
     }
 
     boolean performEditAction(int action) {

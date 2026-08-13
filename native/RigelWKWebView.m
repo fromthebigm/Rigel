@@ -81,8 +81,20 @@ static NSString *LoginDiagnosticsScript(void) {
     return @"(function(){"
         "if(window.__rigelLoginDiagnostics||!/(^|\\.)music\\.apple\\.com$/i.test(location.hostname))return;"
         "window.__rigelLoginDiagnostics=1;"
-        "var tries=0,clicked=false,h=window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.rigelDiagnostics;"
+        "var tries=0,clicked=false,h=window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.rigelDiagnostics,T=false;try{T=top===window}catch(e){T=true}"
         "function send(v){try{h&&h.postMessage(JSON.stringify(v))}catch(e){}}"
+        "function tag(e){return e?String(e.tagName||e.nodeName||'')+(e.id?'#'+e.id:''):''}"
+        "function modalProbe(){"
+          "var input=document.querySelector('input[type=email],input[autocomplete=username],input[name*=email i],input[placeholder*=email i]');"
+          "if(!input){var frames=Array.from(document.querySelectorAll('iframe')).map(function(f){var r=f.getBoundingClientRect(),s=getComputedStyle(f),hit=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);return{src:String(f.src||'').slice(0,300),sandbox:String(f.getAttribute('sandbox')||''),rect:{x:r.x,y:r.y,w:r.width,h:r.height},display:s.display,visibility:s.visibility,pointerEvents:s.pointerEvents,hit:tag(hit),hitIsFrame:hit===f}});send({event:'login-cross-origin-frame',frames:frames,focus:document.hasFocus(),active:tag(document.activeElement)});return}"
+          "var r=input.getBoundingClientRect(),s=getComputedStyle(input),hit=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);"
+          "send({event:'login-input-found',frame:location.href,rect:{x:r.x,y:r.y,w:r.width,h:r.height},disabled:!!input.disabled,readOnly:!!input.readOnly,inert:!!input.closest('[inert]'),display:s.display,visibility:s.visibility,pointerEvents:s.pointerEvents,opacity:s.opacity,hit:tag(hit),hitIsInput:hit===input||input.contains(hit),focus:document.hasFocus(),active:tag(document.activeElement)});"
+        "}"
+        "['pointerdown','mousedown','mouseup','click','focusin','keydown','beforeinput'].forEach(function(type){document.addEventListener(type,function(e){"
+          "var t=e.target,inside=t&&(t.matches&&t.matches('input,button,[role=button],[role=textbox]')||t.closest&&t.closest('[role=dialog]'));if(!inside)return;"
+          "send({event:'login-'+type,frame:location.href,isTrusted:!!e.isTrusted,target:tag(t),active:tag(document.activeElement),defaultPrevented:!!e.defaultPrevented});"
+        "},true)});"
+        "if(!T){send({event:'login-child-frame-ready',frame:location.href});setTimeout(modalProbe,250);setTimeout(modalProbe,1000);return}"
         "function run(){"
           "tries++;"
           "var all=Array.from(document.querySelectorAll('button,a,[role=button]'));"
@@ -91,7 +103,8 @@ static NSString *LoginDiagnosticsScript(void) {
           "var r=target.getBoundingClientRect(),s=getComputedStyle(target),x=r.left+r.width/2,y=r.top+r.height/2,hit=document.elementFromPoint(x,y);"
           "var nav=performance.getEntriesByType('navigation')[0];"
           "send({event:'sign-in-found',url:location.href,tries:tries,timeMs:Math.round(performance.now()),loadEventMs:nav&&Math.round(nav.loadEventEnd)||0,resources:performance.getEntriesByType('resource').length,tag:target.tagName,disabled:!!target.disabled,rect:{x:r.x,y:r.y,w:r.width,h:r.height},display:s.display,visibility:s.visibility,pointerEvents:s.pointerEvents,opacity:s.opacity,hitTag:hit&&hit.tagName||'',hitText:String(hit&&(hit.innerText||hit.textContent)||'').replace(/\\s+/g,' ').trim().slice(0,80)});"
-          "if(!clicked){clicked=true;target.click();send({event:'sign-in-click-dispatched'});}"
+          "if(!clicked){clicked=true;target.addEventListener('click',function(e){send({event:'sign-in-click-observed',isTrusted:!!e.isTrusted});setTimeout(modalProbe,500);setTimeout(modalProbe,1500);});"
+          "if(window.__rigelLoginAutotest){target.click();send({event:'sign-in-autotest-click-dispatched'});}else send({event:'sign-in-ready-for-real-click'});}"
         "}"
         "if(document.readyState==='loading')addEventListener('DOMContentLoaded',run,{once:true});else run();"
     "})();";
@@ -1018,7 +1031,8 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
     NSString *name = message.name ?: @"";
     if ([name isEqualToString:@"rigelDiagnostics"]
             && (getenv("RIGEL_TIKTOK_DIAGNOSTICS") != NULL
-                || getenv("RIGEL_LOGIN_DIAGNOSTICS") != NULL)) {
+                || getenv("RIGEL_LOGIN_DIAGNOSTICS") != NULL
+                || getenv("RIGEL_LOGIN_AUTOTEST") != NULL)) {
         if ([message.body isKindOfClass:[NSString class]])
             NSLog(@"[Rigel diagnostics] %@", (NSString *)message.body);
         return;
@@ -1200,10 +1214,14 @@ static void InstallUserScripts(WKUserContentController *controller, BOOL normali
             injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES];
         [controller addUserScript:tiktokDiagnostics];
     }
-    if (getenv("RIGEL_LOGIN_DIAGNOSTICS") != NULL) {
+    if (getenv("RIGEL_LOGIN_DIAGNOSTICS") != NULL
+            || getenv("RIGEL_LOGIN_AUTOTEST") != NULL) {
+        NSString *source = LoginDiagnosticsScript();
+        if (getenv("RIGEL_LOGIN_AUTOTEST") != NULL)
+            source = [@"window.__rigelLoginAutotest=true;" stringByAppendingString:source];
         WKUserScript *loginDiagnostics = [[WKUserScript alloc]
-            initWithSource:LoginDiagnosticsScript()
-            injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES];
+            initWithSource:source
+            injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];
         [controller addUserScript:loginDiagnostics];
     }
 }
