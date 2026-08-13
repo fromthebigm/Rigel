@@ -84,16 +84,15 @@ static NSString *LoginDiagnosticsScript(void) {
         "var tries=0,clicked=false,h=window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.rigelDiagnostics,T=false;try{T=top===window}catch(e){T=true}"
         "function send(v){try{h&&h.postMessage(JSON.stringify(v))}catch(e){}}"
         "function tag(e){return e?String(e.tagName||e.nodeName||'')+(e.id?'#'+e.id:''):''}"
+        "function wire(d,label){try{if(!d||d.__rigelLoginEventDiagnostics)return;d.__rigelLoginEventDiagnostics=1;['pointerdown','mousedown','mouseup','click','focusin','keydown','beforeinput'].forEach(function(type){d.addEventListener(type,function(e){var t=e.target,inside=t&&(t.matches&&t.matches('input,button,[role=button],[role=textbox]')||t.closest&&t.closest('[role=dialog]'));if(!inside)return;send({event:'login-'+type,frame:label,isTrusted:!!e.isTrusted,target:tag(t),active:tag(d.activeElement),defaultPrevented:!!e.defaultPrevented});},true)});}catch(e){send({event:'login-wire-failed',frame:label,error:String(e)})}}"
+        "function inputState(input,d,label){var r=input.getBoundingClientRect(),s=(d.defaultView||window).getComputedStyle(input),hit=d.elementFromPoint(r.left+r.width/2,r.top+r.height/2);return{frame:label,rect:{x:r.x,y:r.y,w:r.width,h:r.height},disabled:!!input.disabled,readOnly:!!input.readOnly,inert:!!input.closest('[inert]'),display:s.display,visibility:s.visibility,pointerEvents:s.pointerEvents,opacity:s.opacity,hit:tag(hit),hitIsInput:hit===input||input.contains(hit),focus:d.hasFocus(),active:tag(d.activeElement)}}"
         "function modalProbe(){"
           "var input=document.querySelector('input[type=email],input[autocomplete=username],input[name*=email i],input[placeholder*=email i]');"
-          "if(!input){var frames=Array.from(document.querySelectorAll('iframe')).map(function(f){var r=f.getBoundingClientRect(),s=getComputedStyle(f),hit=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);return{src:String(f.src||'').slice(0,300),sandbox:String(f.getAttribute('sandbox')||''),rect:{x:r.x,y:r.y,w:r.width,h:r.height},display:s.display,visibility:s.visibility,pointerEvents:s.pointerEvents,hit:tag(hit),hitIsFrame:hit===f}});send({event:'login-cross-origin-frame',frames:frames,focus:document.hasFocus(),active:tag(document.activeElement)});return}"
-          "var r=input.getBoundingClientRect(),s=getComputedStyle(input),hit=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);"
-          "send({event:'login-input-found',frame:location.href,rect:{x:r.x,y:r.y,w:r.width,h:r.height},disabled:!!input.disabled,readOnly:!!input.readOnly,inert:!!input.closest('[inert]'),display:s.display,visibility:s.visibility,pointerEvents:s.pointerEvents,opacity:s.opacity,hit:tag(hit),hitIsInput:hit===input||input.contains(hit),focus:document.hasFocus(),active:tag(document.activeElement)});"
+          "if(input){send(Object.assign({event:'login-input-found'},inputState(input,document,location.href)));return}"
+          "var frames=Array.from(document.querySelectorAll('iframe')).map(function(f){var r=f.getBoundingClientRect(),s=getComputedStyle(f),hit=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2),label=String(f.src||'').slice(0,300),info={src:label,sandbox:String(f.getAttribute('sandbox')||''),rect:{x:r.x,y:r.y,w:r.width,h:r.height},display:s.display,visibility:s.visibility,pointerEvents:s.pointerEvents,hit:tag(hit),hitIsFrame:hit===f};try{var d=f.contentDocument;info.documentAccessible=!!d;if(d){wire(d,label);info.readyState=d.readyState;info.active=tag(d.activeElement);var inner=d.querySelector('input[type=email],input[autocomplete=username],input[name*=email i],input[placeholder*=email i]');if(inner)info.input=inputState(inner,d,label);info.controls=Array.from(d.querySelectorAll('input,button,[role=button],[role=textbox]')).slice(0,12).map(function(e){return{tag:tag(e),text:String(e.innerText||e.placeholder||e.getAttribute('aria-label')||'').trim().slice(0,80),disabled:!!e.disabled}})}}catch(e){info.documentError=String(e)}return info});"
+          "send({event:'login-frame-state',frames:frames,focus:document.hasFocus(),active:tag(document.activeElement)});"
         "}"
-        "['pointerdown','mousedown','mouseup','click','focusin','keydown','beforeinput'].forEach(function(type){document.addEventListener(type,function(e){"
-          "var t=e.target,inside=t&&(t.matches&&t.matches('input,button,[role=button],[role=textbox]')||t.closest&&t.closest('[role=dialog]'));if(!inside)return;"
-          "send({event:'login-'+type,frame:location.href,isTrusted:!!e.isTrusted,target:tag(t),active:tag(document.activeElement),defaultPrevented:!!e.defaultPrevented});"
-        "},true)});"
+        "wire(document,location.href);"
         "if(!T){send({event:'login-child-frame-ready',frame:location.href});setTimeout(modalProbe,250);setTimeout(modalProbe,1000);return}"
         "function run(){"
           "tries++;"
@@ -527,6 +526,7 @@ static NSString *TikTokNetworkDiagnosticsScript(void) {
 @property(nonatomic, copy) NSString *downloadDirectory;
 @property(nonatomic, assign) BOOL askBeforeDownload;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, RigelWKDownloadState *> *downloads;
+@property(nonatomic, strong) id loginEventMonitor;
 @end
 
 @implementation RigelWKController
@@ -1486,6 +1486,28 @@ void *rigel_wk_create(uintptr_t parentView, uint64_t token,
     webView.allowsMagnification = YES;
     if (@available(macOS 13.3, *)) webView.inspectable = YES;
     [parent addSubview:webView];
+    if (getenv("RIGEL_LOGIN_DIAGNOSTICS") != NULL) {
+        __weak WKWebView *weakView = webView;
+        controller.loginEventMonitor = [NSEvent
+            addLocalMonitorForEventsMatchingMask:(NSEventMaskLeftMouseDown |
+                                                   NSEventMaskLeftMouseUp)
+            handler:^NSEvent *(NSEvent *event) {
+                WKWebView *view = weakView;
+                if (view == nil || event.window != view.window) return event;
+                NSPoint point = [view convertPoint:event.locationInWindow fromView:nil];
+                if (!NSPointInRect(point, view.bounds)) return event;
+                NSView *hit = [view hitTest:point];
+                NSResponder *first = event.window.firstResponder;
+                NSLog(@"[Rigel login diagnostics] native-%@ key=%d main=%d "
+                       "point=(%.1f,%.1f) hit=%@ firstResponder=%@",
+                      event.type == NSEventTypeLeftMouseDown ? @"mousedown" : @"mouseup",
+                      event.window.isKeyWindow, event.window.isMainWindow,
+                      point.x, point.y,
+                      hit == nil ? @"nil" : NSStringFromClass(hit.class),
+                      first == nil ? @"nil" : NSStringFromClass(first.class));
+                return event;
+            }];
+    }
     if (controller.contentBlockingEnabled) ConfigureContentBlocking(controller, YES);
     return (__bridge_retained void *)controller;
 }
@@ -1558,6 +1580,10 @@ __attribute__((visibility("default")))
 void rigel_wk_destroy(void *handle) {
     RigelWKController *controller = Controller(handle);
     if (controller == nil) return;
+    if (controller.loginEventMonitor != nil) {
+        [NSEvent removeMonitor:controller.loginEventMonitor];
+        controller.loginEventMonitor = nil;
+    }
     if (@available(macOS 11.3, *)) {
         for (RigelWKDownloadState *state in controller.downloads.allValues) {
             state.cancelled = YES;
