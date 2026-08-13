@@ -459,6 +459,22 @@ static NSString *TikTokNetworkDiagnosticsScript(void) {
         key, code, (long)keyCode];
 }
 
+- (void)rigelRecoverAppleLoginOnEscape {
+    NSString *host = self.URL.host.lowercaseString ?: @"";
+    if (!([host isEqualToString:@"music.apple.com"]
+            || [host hasSuffix:@".music.apple.com"])) return;
+    NSString *script =
+        @"(function(){try{"
+          "var frames=Array.from(document.querySelectorAll('iframe'));"
+          "var frame=frames.find(function(f){var u=String(f.src||'');if(u.indexOf('/includes/commerce/navigator')<0)return false;var r=f.getBoundingClientRect(),s=getComputedStyle(f);return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden'&&s.pointerEvents!=='none'});"
+          "if(!frame)return false;location.reload();return true;"
+        "}catch(e){return false}})();";
+    [self evaluateJavaScript:script completionHandler:^(id result, __unused NSError *error) {
+        if (getenv("RIGEL_LOGIN_DIAGNOSTICS") != NULL && [result boolValue])
+            NSLog(@"[Rigel login diagnostics] Esc recovered the Apple login overlay");
+    }];
+}
+
 - (void)keyDown:(NSEvent *)event {
     // SWT and AppKit can both route the same native event to an embedded view.
     // Let WebKit process each NSEvent once so contenteditable editors do not
@@ -466,6 +482,7 @@ static NSString *TikTokNetworkDiagnosticsScript(void) {
     if (event == self.rigelLastKeyDownEvent) return;
     self.rigelLastKeyDownEvent = event;
     [self rigelRecordTrustedInput];
+    if (event.keyCode == 53) [self rigelRecoverAppleLoginOnEscape];
     NSString *mirrorScript = [self rigelShouldMirrorArrowKeys] ? [self rigelArrowMirrorScriptForEvent:event] : nil;
     [super keyDown:event];
     if (mirrorScript.length == 0) return;
