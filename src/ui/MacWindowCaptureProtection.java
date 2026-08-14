@@ -14,6 +14,8 @@ import org.eclipse.swt.widgets.Shell;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * Applies capture exclusion to Rigel's Cocoa windows without changing WebKit's
@@ -37,6 +39,21 @@ final class MacWindowCaptureProtection {
 
     /** windowNumber -> NSWindow pointer already protected */
     private static final Map<Long, Long> PROTECTED_WINDOWS = new ConcurrentHashMap<>();
+    /** windowNumber -> NSWindow pointer queued for private compositor protection */
+    private static final Map<Long, Long> PENDING_WINDOWS = new ConcurrentHashMap<>();
+
+    /*
+     * SkyLight calls can wait on WindowServer. They must never run on SWT's
+     * event thread, because that same thread owns WebKit input, painting, and
+     * the native window controls. A single daemon worker preserves call order
+     * without keeping Rigel alive during shutdown.
+     */
+    private static final ExecutorService CAPTURE_WORKER =
+            Executors.newSingleThreadExecutor(task -> {
+                Thread thread = new Thread(task, "Rigel Capture Protection");
+                thread.setDaemon(true);
+                return thread;
+            });
 
     private static volatile boolean functionsResolved;
     private static volatile boolean functionsAvailable;
@@ -189,30 +206,53 @@ final class MacWindowCaptureProtection {
         Long previous = PROTECTED_WINDOWS.get(Long.valueOf(windowNumber));
         if (previous != null && previous.longValue() == window) return;
 
+        // NSWindow access stays on SWT's event thread. This public setting is
+        // applied immediately and remains the first line of capture protection.
         try {
             long selector = OS.sel_registerName("setSharingType:");
             if (selector != 0) OS.objc_msgSend(window, selector, NS_WINDOW_SHARING_NONE);
-
-            if (resolveFunctions()) {
-                CGRect bounds = new CGRect(0.0, 0.0, 32768.0, 32768.0);
-                Pointer region = (Pointer) regionCreate.invoke(Pointer.class, new Object[]{bounds});
-                if (region != null && Pointer.nativeValue(region) != 0L) {
-                    try {
-                        int connection = ((Number) mainConnection.invoke(
-                                Integer.class, new Object[0])).intValue();
-                        captureExclude.invoke(Integer.class,
-                                new Object[]{connection, windowNumber, region});
-                    } finally {
-                        cfRelease.invoke(Void.class, new Object[]{region});
-                    }
-                }
-            }
-
-            // Cache only after the complete attempt. A recreated NSWindow that
-            // reuses a number has a different pointer and will be protected again.
-            PROTECTED_WINDOWS.put(Long.valueOf(windowNumber), Long.valueOf(window));
         } catch (Throwable ignored) {
-            // Do not cache failures; a later bounded retry may succeed.
+            // The private compositor protection below can still succeed.
+        }
+
+        Long key = Long.valueOf(windowNumber);
+        Long pointer = Long.valueOf(window);
+        Long pending = PENDING_WINDOWS.put(key, pointer);
+        if (pending != null && pending.longValue() == window) return;
+
+        CAPTURE_WORKER.execute(() -> {
+            boolean completed = applyPrivateProtection(windowNumber);
+            if (completed && pointer.equals(PENDING_WINDOWS.get(key))) {
+                PROTECTED_WINDOWS.put(key, pointer);
+            }
+            PENDING_WINDOWS.remove(key, pointer);
+        });
+    }
+
+    /** Runs only on CAPTURE_WORKER; never call this from SWT's event thread. */
+    private static boolean applyPrivateProtection(long windowNumber) {
+        try {
+            // If private APIs are unavailable, the public NSWindow sharing
+            // setting above is still active. Treat that as a completed attempt
+            // so the discovery timer does not continuously queue useless work.
+            if (!resolveFunctions()) return true;
+
+            CGRect bounds = new CGRect(0.0, 0.0, 32768.0, 32768.0);
+            Pointer region = (Pointer) regionCreate.invoke(
+                    Pointer.class, new Object[]{bounds});
+            if (region == null || Pointer.nativeValue(region) == 0L) return false;
+            try {
+                int connection = ((Number) mainConnection.invoke(
+                        Integer.class, new Object[0])).intValue();
+                captureExclude.invoke(Integer.class,
+                        new Object[]{connection, windowNumber, region});
+                return true;
+            } finally {
+                cfRelease.invoke(Void.class, new Object[]{region});
+            }
+        } catch (Throwable ignored) {
+            // Leave the window uncached so a later discovery pass can retry.
+            return false;
         }
     }
 

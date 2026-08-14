@@ -52,6 +52,24 @@ static BOOL DiagnosticCaptureEnabled(void) {
     return value != NULL && (!strcmp(value, "1") || !strcasecmp(value, "true"));
 }
 
+static void DisableExtensibleSSO(WKPreferences *preferences) {
+    if (preferences == nil) return;
+
+    /*
+     * A command-line Java host has no stable application bundle for AuthKit's
+     * native AppSSO sheet. When WebKit hands Apple Music login to that sheet,
+     * the parent SWT window can remain main but non-key and neither the sheet
+     * nor the browser accepts input. WebKit provides this guarded preference
+     * so embedders can opt out and use the site's normal web authentication
+     * flow instead.
+     */
+    SEL selector = NSSelectorFromString(@"_setExtensibleSSOEnabled:");
+    if (![preferences respondsToSelector:selector]) return;
+    IMP implementation = [preferences methodForSelector:selector];
+    if (implementation != NULL)
+        ((void (*)(id, SEL, BOOL))implementation)(preferences, selector, NO);
+}
+
 static NSString *BridgeScript(void) {
     return @"(function(){"
         "if(window.__rigelNativeBridge)return;"
@@ -400,18 +418,25 @@ static NSString *TikTokNetworkDiagnosticsScript(void) {
     // even after a click and WebKit intentionally withholds DOM mouse events.
     // Activate only in response to a real click inside this web view, then make
     // its window key before handing the original NSEvent to WebKit.
-    if (self.window != nil && !self.window.isKeyWindow) {
-        if (!NSApp.isActive) [NSApp activateIgnoringOtherApps:YES];
-        [self.window makeKeyAndOrderFront:nil];
+    if (self.window != nil) {
+        if (!self.window.isKeyWindow) {
+            if (!NSApp.isActive) [NSApp activateIgnoringOtherApps:YES];
+            [self.window makeKeyAndOrderFront:nil];
+        }
+        // The July/August builds explicitly returned the native WebKit view
+        // to the first-responder chain before forwarding every real click.
+        [self.window makeFirstResponder:self];
     }
     [super mouseDown:event];
 }
 
 - (void)rightMouseDown:(NSEvent *)event {
+    if (self.window != nil) [self.window makeFirstResponder:self];
     [super rightMouseDown:event];
 }
 
 - (void)otherMouseDown:(NSEvent *)event {
+    if (self.window != nil) [self.window makeFirstResponder:self];
     [super otherMouseDown:event];
 }
 
@@ -1476,6 +1501,7 @@ void *rigel_wk_create(uintptr_t parentView, uint64_t token,
     if (@available(macOS 11.3, *)) {
         configuration.preferences.textInteractionEnabled = YES;
     }
+    DisableExtensibleSSO(configuration.preferences);
     if ([configuration respondsToSelector:@selector(setMediaTypesRequiringUserActionForPlayback:)]) {
         configuration.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;
     }
