@@ -37,6 +37,12 @@ enum {
     RIGEL_WK_PROXY_SOCKS5 = 2
 };
 
+/* ABI-compatible with WebKit's private _WKSOAuthorizationLoadPolicy. */
+enum {
+    RIGEL_WK_SO_AUTHORIZATION_ALLOW = 0,
+    RIGEL_WK_SO_AUTHORIZATION_IGNORE = 1
+};
+
 static const char *Utf8(NSString *value) {
     return value == nil ? "" : value.UTF8String;
 }
@@ -697,6 +703,9 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
 }
 
 - (WKWebView *)createPopupWebViewWithConfiguration:(WKWebViewConfiguration *)configuration {
+    // WebKit supplies a separate configuration for window.open()/OAuth views.
+    // Do not rely on it inheriting the main view's AppSSO preference.
+    DisableExtensibleSSO(configuration.preferences);
     NSRect frame = NSMakeRect(0, 0, 1050, 720);
     WKWebView *popup = [[RigelWKNativeView alloc] initWithFrame:frame
                                                   configuration:configuration];
@@ -928,6 +937,27 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
         return;
     }
     decisionHandler(WKNavigationActionPolicyAllow);
+}
+
+/*
+ * Defense in depth for WebKit's Extensible SSO interception. The preference on
+ * each configuration prevents the interception up front. If WebKit still asks
+ * its private navigation-delegate policy (for example for a supplied popup
+ * configuration), Ignore deterministically resumes the ordinary web request
+ * instead of presenting AuthKit's unusable native sheet from an anonymous Java
+ * host. The enum and block parameter are NSInteger-sized in WebKit's ABI.
+ */
+- (void)_webView:(WKWebView *)webView
+    decidePolicyForSOAuthorizationLoadWithCurrentPolicy:(NSInteger)currentPolicy
+                                           forExtension:(NSString *)extension
+                                      completionHandler:(void (^)(NSInteger))completionHandler {
+    (void)webView;
+    (void)currentPolicy;
+    if (getenv("RIGEL_LOGIN_DIAGNOSTICS") != NULL) {
+        NSLog(@"[Rigel login diagnostics] ignored native AppSSO extension %@",
+              extension ?: @"(unknown)");
+    }
+    completionHandler(RIGEL_WK_SO_AUTHORIZATION_IGNORE);
 }
 
 - (void)webView:(WKWebView *)webView
