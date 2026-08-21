@@ -58,6 +58,8 @@ import java.util.List;
  */
 public class TabManager {
 
+    private static final int MAX_LIVE_TABS = 64;
+
     // ── Home page HTML ───────────────────────────────────────────────────────
 
     /** Generates a theme-aware home page. Called each time rigel://home is loaded. */
@@ -178,6 +180,10 @@ public class TabManager {
         sb.append("  document.getElementById('search-form').addEventListener('submit', function(e) {\n");
         sb.append("    e.preventDefault(); if (composing) return; var value = q.value.trim(); if (!value) return;\n");
         sb.append("    if (typeof window.rigelHomeNavigate === 'function') window.rigelHomeNavigate(value);\n");
+        sb.append("  });\n");
+        sb.append("  document.addEventListener('click', function(e) {\n");
+        sb.append("    var a = e.target && e.target.closest ? e.target.closest('a.quick-link') : null; if (!a) return;\n");
+        sb.append("    if (typeof window.rigelHomeNavigate !== 'function') return; e.preventDefault(); window.rigelHomeNavigate(a.href);\n");
         sb.append("  });\n");
         sb.append("  document.getElementById('q').addEventListener('input', function(){ this.style.color='#").append(textFg).append("'; this.style.webkitTextFillColor='#").append(textFg).append("'; });\n");
         sb.append("  window.addEventListener('pointerdown', function(){ userInteracted = true; }, {once:true, capture:true});\n");
@@ -1393,11 +1399,16 @@ public class TabManager {
     // ── Tab lifecycle ────────────────────────────────────────────────────────
 
     public void createTab(String title, String initialUrl) {
+        if (tabs.size() >= MAX_LIVE_TABS) {
+            ui.onTabLimitReached(MAX_LIVE_TABS);
+            return;
+        }
         Composite container = new Composite(contentArea, SWT.NONE);
         container.setBackgroundMode(SWT.INHERIT_FORCE);
         container.setLayout(new FillLayout());
 
         RigelBrowser browser = new RigelBrowser(container, SWT.NONE);
+        installKeyboardFocusDocumentScript(browser);
 
         TabData tab = new TabData(container, browser, title, initialUrl);
         tabs.add(tab);
@@ -1448,11 +1459,16 @@ public class TabManager {
     }
 
     private RigelBrowser createBlankTab(String title, String url) {
+        if (tabs.size() >= MAX_LIVE_TABS) {
+            ui.onTabLimitReached(MAX_LIVE_TABS);
+            return null;
+        }
         Composite container = new Composite(contentArea, SWT.NONE);
         container.setBackgroundMode(SWT.INHERIT_FORCE);
         container.setLayout(new FillLayout());
 
         RigelBrowser browser = new RigelBrowser(container, SWT.NONE);
+        installKeyboardFocusDocumentScript(browser);
         TabData tab = new TabData(container, browser, title, url);
         tabs.add(tab);
         int idx = tabs.size() - 1;
@@ -1676,6 +1692,7 @@ public class TabManager {
         }
         stackLayout.topControl = tab.container;
         contentArea.layout();
+        tab.browser.resumeAfterContentProcessTermination();
         ui.onActiveTabChanged();
         ui.onTabsChanged();
         ui.onActiveTabLoadState(tab.loading, tab.progress);
@@ -1724,6 +1741,31 @@ public class TabManager {
                 b.reload();
             }
         });
+    }
+
+    /** Reloads every live tab in a short stagger, avoiding a simultaneous network burst. */
+    public void reloadAll() {
+        if (contentArea == null || contentArea.isDisposed()) return;
+        List<TabData> snapshot = List.copyOf(tabs);
+        int delay = 0;
+        for (TabData tab : snapshot) {
+            int tabDelay = tab == activeTab() ? 0 : (delay += 75);
+            contentArea.getDisplay().timerExec(tabDelay, () -> {
+                if (!tabs.contains(tab) || tab.browser == null || tab.browser.isDisposed()) return;
+                beginLoading(tab);
+                if ("rigel://home".equals(tab.url)) {
+                    tab.title = "New Tab";
+                    renderHome(tab);
+                    if (isActive(tab)) {
+                        syncChrome(tab);
+                        focusBrowserSoon(tab);
+                    }
+                } else {
+                    if (isActive(tab)) syncChrome(tab);
+                    tab.browser.reload();
+                }
+            });
+        }
     }
 
     public void reloadIgnoringCache() {
@@ -1817,7 +1859,12 @@ public class TabManager {
         b.addLocationListener(new RigelBrowser.LocationListener() {
             @Override
             public boolean changing(String location) {
-                ui.onBrowserNavigating(b);
+                // Native WebKit is synchronously waiting for this policy
+                // answer. Defer fullscreen/AppKit mutations until the callback
+                // unwinds to avoid re-entering WebKit from its decision handler.
+                b.getDisplay().asyncExec(() -> {
+                    if (!b.isDisposed() && tabs.contains(tab)) ui.onBrowserNavigating(b);
+                });
                 long generation = ++tab.navigationGeneration;
                 // Intercept rigel://home before WebKit tries to fetch it
                 if ("rigel://home".equals(location)) {
@@ -1991,27 +2038,64 @@ public class TabManager {
     window.__rigelKeyFocusShim = true;
 
     var INTERACTIVE_SELECTOR =
-        'input, textarea, select, button, a[href], label, summary, video, audio, details, '
+        'input, textarea, select, button, a[href], label, summary, details, '
         + '[contenteditable], [role="button"], [role="link"], [role="checkbox"], [role="radio"], '
         + '[role="switch"], [role="tab"], [role="menuitem"], [role="menu"], [role="dialog"], '
         + '[role="listbox"], [role="option"], [role="combobox"], [role="textbox"], [tabindex]';
 
+    var EXPLICIT_CONTROL_SELECTOR =
+        'input, textarea, select, button, a[href], label, summary, details, [contenteditable], '
+        + '[role="button"], [role="link"], [role="checkbox"], [role="radio"], [role="switch"], '
+        + '[role="tab"], [role="menuitem"], [role="menu"], [role="dialog"], [role="listbox"], '
+        + '[role="option"], [role="combobox"], [role="textbox"]';
+
     var SAFE_SURFACE_SELECTOR = 'canvas, [data-rigel-keyboard-focus]';
     var COMPAT_SURFACE_SELECTOR = SAFE_SURFACE_SELECTOR
-        + ', [role="application"], [data-game], .html5-video-player, .video-player, .watch-video'
+        + ', video, audio, [role="application"], [data-game], .html5-video-player, .video-player, .watch-video'
         + ', .NFPlayer, .video-js, .jwplayer, .plyr, .shaka-video-container'
         + ', .clappr-container, .mejs__container, .player';
+
+    var MODE_MESSAGE = '__rigel_web_input_mode_v1__';
 
     function normalizeMode(value) {
         value = String(value || '').trim().toLowerCase();
         return value === 'compatibility' || value === 'controls' ? value : 'automatic';
     }
 
+    function sendMode(target) {
+        try {
+            target.postMessage({ rigelType: MODE_MESSAGE, mode: window.__rigelWebInputMode }, '*');
+        } catch (e) {}
+    }
+
+    function forwardMode() {
+        for (var i = 0; i < window.frames.length; i++) sendMode(window.frames[i]);
+    }
+
     window.__rigelSetWebInputMode = function (value) {
         window.__rigelWebInputMode = normalizeMode(value);
+        forwardMode();
         return window.__rigelWebInputMode;
     };
     window.__rigelSetWebInputMode(window.__rigelWebInputMode || 'automatic');
+
+    window.addEventListener('message', function (event) {
+        var data = event && event.data;
+        if (!data || data.rigelType !== MODE_MESSAGE) return;
+        if (data.request === true) {
+            for (var i = 0; i < window.frames.length; i++) {
+                if (window.frames[i] === event.source) { sendMode(event.source); break; }
+            }
+            return;
+        }
+        if (window === window.top || event.source !== window.parent) return;
+        window.__rigelWebInputMode = normalizeMode(data.mode);
+        forwardMode();
+    }, false);
+    if (window !== window.top) {
+        try { window.parent.postMessage({ rigelType: MODE_MESSAGE, request: true }, '*'); }
+        catch (e) {}
+    }
 
     function effectiveMode() {
         var mode = normalizeMode(window.__rigelWebInputMode);
@@ -2040,18 +2124,29 @@ public class TabManager {
         return path;
     }
 
-    function interactiveNode(node) {
+    function nodeMatches(node, selector) {
+        try {
+            return !!(node && node.nodeType === 1 && typeof node.matches === 'function'
+                    && node.matches(selector));
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function interactiveNode(node, mode) {
         if (!node || node.nodeType !== 1) return false;
         if (node.isContentEditable) return true;
         try {
+            if (nodeMatches(node, EXPLICIT_CONTROL_SELECTOR)) return true;
+            // Player roots commonly carry tabindex, role=application, onclick,
+            // or cursor:pointer. In Compatibility mode those attributes belong
+            // to the keyboard surface, not to a child control. Explicit overlay
+            // buttons are caught above before their player ancestor is reached.
+            if (mode === 'compatibility' && nodeMatches(node, COMPAT_SURFACE_SELECTOR)) return false;
             if (typeof node.matches === 'function' && node.matches(INTERACTIVE_SELECTOR)) return true;
             if (typeof node.onclick === 'function' || node.hasAttribute('onclick')) return true;
             var role = String(node.getAttribute('role') || '').toLowerCase();
             if (/^(button|link|checkbox|radio|switch|tab|menuitem|option)$/.test(role)) return true;
-            // A whole canvas/player/application surface may use cursor:pointer.
-            // Treat only a pointer-styled descendant as a control; otherwise
-            // Compatibility mode would never be able to focus the surface.
-            if (typeof node.matches === 'function' && node.matches(COMPAT_SURFACE_SELECTOR)) return false;
             var style = window.getComputedStyle ? window.getComputedStyle(node) : null;
             return !!(style && style.cursor === 'pointer');
         } catch (e) {
@@ -2060,16 +2155,18 @@ public class TabManager {
     }
 
     function interactiveEvent(event) {
+        var mode = effectiveMode();
         var path = eventPath(event);
         for (var i = 0; i < path.length; i++) {
-            if (interactiveNode(path[i])) return true;
+            if (interactiveNode(path[i], mode)) return true;
         }
         return false;
     }
 
-    function interactiveElement(el) {
+    function interactiveElement(el, mode) {
         if (!el) return false;
-        if (interactiveNode(el)) return true;
+        if (interactiveNode(el, mode)) return true;
+        if (mode === 'compatibility' && nodeMatches(el, COMPAT_SURFACE_SELECTOR)) return false;
         try {
             return typeof el.closest === 'function' && !!el.closest(INTERACTIVE_SELECTOR);
         } catch (e) {
@@ -2089,16 +2186,18 @@ public class TabManager {
         return false;
     }
 
-    function keyboardSurface(event) {
-        var mode = effectiveMode();
+    function keyboardSurface(event, mode) {
         return pathMatches(event, mode === 'compatibility'
                 ? COMPAT_SURFACE_SELECTOR : SAFE_SURFACE_SELECTOR);
     }
 
     function focusDocumentBody() {
-        if (!document.body || interactiveElement(document.activeElement)) return;
+        if (!document.body) return;
+        var mode = effectiveMode();
         var active = document.activeElement;
-        if (active && active !== document.body && active !== document.documentElement) return;
+        if (interactiveElement(active, mode)) return;
+        if (active && active !== document.body && active !== document.documentElement
+                && !(mode === 'compatibility' && nodeMatches(active, COMPAT_SURFACE_SELECTOR))) return;
         try {
             if (!document.body.hasAttribute('tabindex')) document.body.setAttribute('tabindex', '-1');
             document.body.focus({ preventScroll: true });
@@ -2107,8 +2206,9 @@ public class TabManager {
 
     var focusEvent = (typeof PointerEvent === 'function') ? 'pointerdown' : 'mousedown';
     document.addEventListener(focusEvent, function (event) {
+        var mode = effectiveMode();
         if (event.defaultPrevented || (typeof event.button === 'number' && event.button !== 0) ||
-                interactiveEvent(event) || !keyboardSurface(event)) return;
+                interactiveEvent(event) || !keyboardSurface(event, mode)) return;
 
         var activeBefore = document.activeElement;
         setTimeout(function () {
@@ -2123,6 +2223,11 @@ public class TabManager {
     }, true);
 })();
 """;
+
+    static boolean installKeyboardFocusDocumentScript(RigelBrowser browser) {
+        return browser != null && !browser.isDisposed()
+                && browser.addDocumentStartScript(KEY_FOCUS_JS);
+    }
 
     private static final String CLIPBOARD_SHIM_JS = """
 (function () {

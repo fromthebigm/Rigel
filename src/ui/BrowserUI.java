@@ -3100,6 +3100,12 @@ public class BrowserUI {
         });
     }
 
+    void onTabLimitReached(int limit) {
+        presentStatus("Live tab limit reached (" + limit
+                + "). Close an older tab before opening another.");
+        if (shell != null && !shell.isDisposed()) shell.getDisplay().beep();
+    }
+
     private boolean key(Event e, char c) {
         char want = Character.toLowerCase(c);
         char fromKey = e.keyCode > 0 && e.keyCode <= Character.MAX_VALUE
@@ -3446,17 +3452,20 @@ public class BrowserUI {
         Composite proxyPage = settingsPage(tabs, "Network", 1);
         sectionHeader(proxyPage, "Rigel network");
         Label localProxyStatus = new Label(proxyPage, SWT.WRAP);
+        String localRoute = "WKWebView -> SOCKS5 127.0.0.1:"
+                + proxyServer.getBrowserProxyPort() + " -> HTTP CONNECT 127.0.0.1:"
+                + proxyServer.getLocalPort();
         if (proxyServer.isUsingUpstream()) {
             ProxyServer.Upstream current = proxyServer.getUpstream();
-            localProxyStatus.setText("WKWebView -> HTTP CONNECT 127.0.0.1:"
-                    + proxyServer.getLocalPort() + " -> " + current.type() + " "
-                    + current.host() + ":" + current.port()
-                    + ". Every site stays on the local proxy route.");
+            String udpRoute = current.type() == ProxyServer.UpstreamType.SOCKS5
+                    ? "UDP is relayed through the same SOCKS5 upstream."
+                    : "UDP is refused for this upstream type so it cannot bypass the selected route; WebKit can fall back to TCP.";
+            localProxyStatus.setText(localRoute + " -> " + current.type() + " "
+                    + current.host() + ":" + current.port() + ". " + udpRoute);
         } else {
-            localProxyStatus.setText(
-                    "WKWebView -> HTTP CONNECT 127.0.0.1:" + proxyServer.getLocalPort()
-                    + " -> DIRECT. Every site stays behind Rigel's local proxy; DIRECT means "
-                    + "LittleProxy connects to the destination without a system/upstream proxy.");
+            localProxyStatus.setText(localRoute
+                    + " -> DIRECT for TCP; UDP uses Rigel's local direct relay. "
+                    + "Both loopback stages are inside Rigel; DIRECT means there is no external upstream or VPN.");
         }
         localProxyStatus.setBackground(colNavBg);
         localProxyStatus.setForeground(colTextMuted);
@@ -3649,7 +3658,7 @@ public class BrowserUI {
                 ensureWebProxyRouting();
                 d.close();
                 shell.getDisplay().asyncExec(() -> {
-                    if (tabManager != null) tabManager.reload();
+                    if (tabManager != null) tabManager.reloadAll();
                 });
             });
         }
@@ -3760,8 +3769,9 @@ public class BrowserUI {
             shell.getDisplay().asyncExec(() -> {
                 if (shell == null || shell.isDisposed()) return;
                 settingsChangedAction.run();
-                if ((av1CompatibilityChanged || proxyRoutingChanged) && tabManager != null) {
-                    tabManager.reload();
+                if (tabManager != null) {
+                    if (proxyRoutingChanged) tabManager.reloadAll();
+                    else if (av1CompatibilityChanged) tabManager.reload();
                 }
                 MacWindowCaptureProtection.protectSoon(shell);
             });
@@ -3772,7 +3782,8 @@ public class BrowserUI {
     }
 
     private void ensureWebProxyRouting() {
-        RigelBrowser.configureProxy(proxyServer.getLocalPort(), RigelBrowser.PROXY_HTTP);
+        RigelBrowser.configureProxy(
+                proxyServer.getBrowserProxyPort(), RigelBrowser.PROXY_SOCKS5);
     }
 
     // ── Settings helpers ──────────────────────────────────────────────────────

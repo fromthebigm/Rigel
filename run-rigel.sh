@@ -30,8 +30,14 @@ if [[ -z "$JAVA" || ! -x "$JAVA" ]]; then
   print -u2 "No Java runtime found. Add the bundled jdk/ folder or set JAVA_HOME."
   exit 1
 fi
+
+# Keep fatal JVM/native crash reports beside Rigel's portable settings so a
+# failure on another Mac leaves actionable evidence. The JVM writes this file
+# only after a fatal error; Rigel never uploads it.
+mkdir -p "$DIR/portable-data/profile"
 exec "$JAVA" \
   -XstartOnFirstThread \
+  -XX:ErrorFile="$DIR/portable-data/profile/hs_err_pid%p.log" \
   -Drigel.root="$DIR" \
   -Xdock:icon="$DIR/Weather.icns" \
   -cp "$DIR/target/rigel.jar:$DIR/lib/*" \

@@ -1,11 +1,14 @@
 package config;
 
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Deque;
 import java.util.List;
 
 /**
@@ -28,6 +31,10 @@ public class History {
     }
 
     private static final int MAX_ENTRIES = 2000;
+    private static final int MAX_TITLE_CODE_POINTS = 512;
+    private static final int MAX_URL_CODE_POINTS = 4096;
+    private static final int MAX_LINE_CHARS = 16_384;
+    private static final long MAX_FILE_BYTES = 16L * 1024L * 1024L;
 
     private final Path file = Settings.DIR.resolve("history.tsv");
     private final List<Entry> entries = new ArrayList<>();
@@ -37,29 +44,51 @@ public class History {
     private void load() {
         entries.clear();
         if (!Files.exists(file)) return;
+        Deque<Entry> recent = new ArrayDeque<>(MAX_ENTRIES);
+        boolean trimmed = false;
         try {
-            for (String line : Files.readAllLines(file)) {
-                String[] parts = line.split("\t", 3);
-                if (parts.length < 3) continue;
-                try {
-                    entries.add(new Entry(Long.parseLong(parts[0]), parts[1], parts[2]));
-                } catch (NumberFormatException ignored) {}
+            if (Files.size(file) > MAX_FILE_BYTES) {
+                System.err.println("[Rigel] History file is too large; ignoring it");
+                return;
             }
+            try (BufferedReader reader = Files.newBufferedReader(file)) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (line.length() > MAX_LINE_CHARS) continue;
+                    String[] parts = line.split("\t", 3);
+                    if (parts.length < 3) continue;
+                    try {
+                        String title = clean(parts[1], MAX_TITLE_CODE_POINTS);
+                        String url = clean(parts[2], MAX_URL_CODE_POINTS);
+                        if (url.isEmpty()) continue;
+                        if (recent.size() == MAX_ENTRIES) {
+                            recent.removeFirst();
+                            trimmed = true;
+                        }
+                        recent.addLast(new Entry(Long.parseLong(parts[0]), title, url));
+                    } catch (NumberFormatException ignored) {}
+                }
+            }
+            entries.addAll(recent);
+            if (trimmed) save();
         } catch (IOException e) {
             System.err.println("[Rigel] Could not read history: " + e.getMessage());
         }
     }
 
-    private static String clean(String s) {
-        return s == null ? "" : s.replace('\t', ' ').replace('\n', ' ').replace('\r', ' ').trim();
+    private static String clean(String s, int maxCodePoints) {
+        String clean = s == null ? "" : s.replace('\t', ' ').replace('\n', ' ').replace('\r', ' ').trim();
+        int count = clean.codePointCount(0, clean.length());
+        return count <= maxCodePoints
+                ? clean : clean.substring(0, clean.offsetByCodePoints(0, maxCodePoints));
     }
 
     public synchronized void record(String title, String url) {
-        String u = clean(url);
+        String u = clean(url, MAX_URL_CODE_POINTS);
         if (u.isEmpty() || u.equals("rigel://home") || u.equals("about:blank")) return;
         // Collapse consecutive duplicates of the same URL
         if (!entries.isEmpty() && entries.get(entries.size() - 1).url.equals(u)) return;
-        Entry entry = new Entry(System.currentTimeMillis(), clean(title), u);
+        Entry entry = new Entry(System.currentTimeMillis(), clean(title, MAX_TITLE_CODE_POINTS), u);
         entries.add(entry);
         boolean trimmed = false;
         if (entries.size() > MAX_ENTRIES) {

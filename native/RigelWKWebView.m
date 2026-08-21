@@ -43,6 +43,12 @@ enum {
     RIGEL_WK_SO_AUTHORIZATION_IGNORE = 1
 };
 
+/* ABI-compatible with WebKit's private app-link-suppression policy. */
+enum {
+    RIGEL_WK_NAVIGATION_ALLOW_WITHOUT_TRYING_APP_LINK =
+        WKNavigationActionPolicyAllow + 2
+};
+
 static const char *Utf8(NSString *value) {
     return value == nil ? "" : value.UTF8String;
 }
@@ -58,22 +64,23 @@ static BOOL DiagnosticCaptureEnabled(void) {
     return value != NULL && (!strcmp(value, "1") || !strcasecmp(value, "true"));
 }
 
-static void DisableExtensibleSSO(WKPreferences *preferences) {
-    if (preferences == nil) return;
+static BOOL IsWebNavigationURL(NSURL *url) {
+    NSString *scheme = url.scheme.lowercaseString;
+    return [scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"];
+}
 
-    /*
-     * A command-line Java host has no stable application bundle for AuthKit's
-     * native AppSSO sheet. When WebKit hands Apple Music login to that sheet,
-     * the parent SWT window can remain main but non-key and neither the sheet
-     * nor the browser accepts input. WebKit provides this guarded preference
-     * so embedders can opt out and use the site's normal web authentication
-     * flow instead.
-     */
-    SEL selector = NSSelectorFromString(@"_setExtensibleSSOEnabled:");
-    if (![preferences respondsToSelector:selector]) return;
-    IMP implementation = [preferences methodForSelector:selector];
-    if (implementation != NULL)
-        ((void (*)(id, SEL, BOOL))implementation)(preferences, selector, NO);
+static BOOL IsBlockedAppleAppScheme(NSURL *url) {
+    NSString *scheme = url.scheme.lowercaseString;
+    return [scheme isEqualToString:@"music"]
+        || [scheme isEqualToString:@"itms"]
+        || [scheme isEqualToString:@"itmss"]
+        || [scheme isEqualToString:@"itms-apps"];
+}
+
+static WKNavigationActionPolicy InBrowserPolicyForURL(NSURL *url) {
+    return IsWebNavigationURL(url)
+        ? (WKNavigationActionPolicy)RIGEL_WK_NAVIGATION_ALLOW_WITHOUT_TRYING_APP_LINK
+        : WKNavigationActionPolicyAllow;
 }
 
 static NSString *BridgeScript(void) {
@@ -567,6 +574,9 @@ static NSString *TikTokNetworkDiagnosticsScript(void) {
 @property(nonatomic, assign) BOOL askBeforeDownload;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, RigelWKDownloadState *> *downloads;
 @property(nonatomic, strong) id loginEventMonitor;
+@property(nonatomic, strong) NSMutableArray<WKUserScript *> *additionalUserScripts;
+@property(nonatomic, strong) NSMapTable<WKWebView *, NSMutableArray<NSNumber *> *>
+    *processTerminationHistory;
 @end
 
 @implementation RigelWKController
@@ -703,9 +713,11 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
 }
 
 - (WKWebView *)createPopupWebViewWithConfiguration:(WKWebViewConfiguration *)configuration {
-    // WebKit supplies a separate configuration for window.open()/OAuth views.
-    // Do not rely on it inheriting the main view's AppSSO preference.
-    DisableExtensibleSSO(configuration.preferences);
+    // WebKit supplies this configuration after it has begun deciding the
+    // window.open()/OAuth navigation. Never mutate its AppSSO preference here;
+    // affected WebKit versions can retain the earlier authorization flag and
+    // RELEASE_ASSERT when the preference and decision disagree. AppSSO is
+    // rejected solely through the navigation-delegate policy below.
     NSRect frame = NSMakeRect(0, 0, 1050, 720);
     WKWebView *popup = [[RigelWKNativeView alloc] initWithFrame:frame
                                                   configuration:configuration];
@@ -865,6 +877,10 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
 - (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)navigation
       withError:(NSError *)error {
     if ([error.domain isEqualToString:NSURLErrorDomain] && error.code == NSURLErrorCancelled) return;
+    if (getenv("RIGEL_PROXY_DIAGNOSTICS") != NULL) {
+        NSLog(@"[Rigel proxy diagnostics] navigation failed domain=%@ code=%ld message=%@",
+              error.domain, (long)error.code, error.localizedDescription);
+    }
     if ([self isPendingPopup:webView]) {
         [self updatePopupWindowForWebView:webView loading:NO];
         NSLog(@"[Rigel] Popup navigation failed: %@", error.localizedDescription);
@@ -878,6 +894,10 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
 - (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation
       withError:(NSError *)error {
     if ([error.domain isEqualToString:NSURLErrorDomain] && error.code == NSURLErrorCancelled) return;
+    if (getenv("RIGEL_PROXY_DIAGNOSTICS") != NULL) {
+        NSLog(@"[Rigel proxy diagnostics] provisional navigation failed domain=%@ code=%ld message=%@",
+              error.domain, (long)error.code, error.localizedDescription);
+    }
     if ([self isPendingPopup:webView]) {
         [self updatePopupWindowForWebView:webView loading:NO];
         NSLog(@"[Rigel] Popup provisional navigation failed: %@", error.localizedDescription);
@@ -889,26 +909,86 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
 }
 
 - (void)webViewWebContentProcessDidTerminate:(WKWebView *)webView {
+    NSTimeInterval now = NSDate.date.timeIntervalSince1970;
+    if (_processTerminationHistory == nil)
+        _processTerminationHistory = [NSMapTable weakToStrongObjectsMapTable];
+    NSMutableArray<NSNumber *> *history = [_processTerminationHistory objectForKey:webView];
+    if (history == nil) {
+        history = [NSMutableArray array];
+        [_processTerminationHistory setObject:history forKey:webView];
+    }
+    while (history.count > 0 && now - history.firstObject.doubleValue > 60.0)
+        [history removeObjectAtIndex:0];
+    [history addObject:@(now)];
+    BOOL retryAllowed = history.count <= 3;
+    NSTimeInterval retryDelay = 0.25 * (1 << MIN((NSUInteger)2, history.count - 1));
+
     if ([self isPendingPopup:webView]) {
+        if (!retryAllowed) {
+            NSWindow *window = [self popupWindowForWebView:webView];
+            if (window != nil) window.title = @"Rigel — page repeatedly crashed";
+            NSLog(@"[Rigel] Popup WebContent process repeatedly terminated; automatic reload stopped");
+            return;
+        }
         [self updatePopupWindowForWebView:webView loading:YES];
-        [webView reload];
+        __weak RigelWKController *weakSelf = self;
+        __weak WKWebView *weakWebView = webView;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                     (int64_t)(retryDelay * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            RigelWKController *strongSelf = weakSelf;
+            WKWebView *strongWebView = weakWebView;
+            if (strongSelf != nil && strongWebView != nil
+                    && [strongSelf isPendingPopup:strongWebView]) [strongWebView reload];
+        });
         return;
     }
     [self emit:RIGEL_WK_EVENT_PROCESS_RESTARTED
           first:webView.URL.absoluteString ?: @"" second:@""];
-    [webView reload];
+    // WebKit may terminate hidden content processes specifically to recover
+    // memory. Reloading every hidden tab immediately defeats that recovery and
+    // can create a reload/termination storm when many tabs are open. Java
+    // remembers the event and reloads the tab when it becomes visible again.
+    if (webView.window == nil || webView.isHiddenOrHasHiddenAncestor) return;
+    if (!retryAllowed) {
+        [self emit:RIGEL_WK_EVENT_LOAD_FAILED
+              first:webView.URL.absoluteString ?: @""
+             second:@"Web content process repeatedly crashed; automatic reload stopped"];
+        NSLog(@"[Rigel] WebContent process repeatedly terminated; automatic reload stopped");
+        return;
+    }
+    __weak RigelWKController *weakSelf = self;
+    __weak WKWebView *weakWebView = webView;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                 (int64_t)(retryDelay * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        RigelWKController *strongSelf = weakSelf;
+        WKWebView *strongWebView = weakWebView;
+        if (strongSelf == nil || strongWebView == nil || strongSelf.webView != strongWebView
+                || strongWebView.window == nil || strongWebView.isHiddenOrHasHiddenAncestor) return;
+        [strongWebView reload];
+    });
 }
 
 - (void)webView:(WKWebView *)webView
     decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction
                     decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
+    NSURL *url = navigationAction.request.URL;
+    if (IsBlockedAppleAppScheme(url)) {
+        if (getenv("RIGEL_LOGIN_DIAGNOSTICS") != NULL) {
+            NSLog(@"[Rigel login diagnostics] blocked external Apple app scheme %@",
+                  url.scheme.lowercaseString ?: @"(unknown)");
+        }
+        decisionHandler(WKNavigationActionPolicyCancel);
+        return;
+    }
     if ([self isPendingPopup:webView]) {
         // Keep popup navigation inside the exact WKWebView WebKit created for
         // it. OAuth and Apple Music use window.opener/postMessage while the
         // popup crosses several authentication origins. Running the main-tab
         // policy callback here both corrupts its progress state and breaks the
         // opener relationship when the URL is recreated elsewhere.
-        decisionHandler(WKNavigationActionPolicyAllow);
+        decisionHandler(InBrowserPolicyForURL(url));
         return;
     }
     if (@available(macOS 11.3, *)) {
@@ -921,31 +1001,32 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
             return;
         }
     }
-    if (navigationAction.targetFrame == nil && navigationAction.request.URL != nil) {
+    if (navigationAction.targetFrame == nil && url != nil) {
         // Let WKUIDelegate create the requested web view with WebKit's supplied
         // configuration. Replacing this with an unrelated Rigel tab loses the
         // opener, transient user activation, cookies, and OAuth callbacks.
-        decisionHandler(WKNavigationActionPolicyAllow);
+        decisionHandler(InBrowserPolicyForURL(url));
         return;
     }
     if (navigationAction.targetFrame != nil && !navigationAction.targetFrame.mainFrame) {
-        decisionHandler(WKNavigationActionPolicyAllow);
+        decisionHandler(InBrowserPolicyForURL(url));
         return;
     }
     if (![self shouldAllowNavigationToURL:navigationAction.request.URL]) {
         decisionHandler(WKNavigationActionPolicyCancel);
         return;
     }
-    decisionHandler(WKNavigationActionPolicyAllow);
+    decisionHandler(InBrowserPolicyForURL(url));
 }
 
 /*
- * Defense in depth for WebKit's Extensible SSO interception. The preference on
- * each configuration prevents the interception up front. If WebKit still asks
- * its private navigation-delegate policy (for example for a supplied popup
- * configuration), Ignore deterministically resumes the ordinary web request
- * instead of presenting AuthKit's unusable native sheet from an anonymous Java
- * host. The enum and block parameter are NSInteger-sized in WebKit's ABI.
+ * Reject WebKit's Extensible SSO interception through its navigation policy,
+ * leaving the preference enabled and internally consistent. Disabling the
+ * preference can crash affected macOS WebKit builds when an asynchronous
+ * navigation already carries an SSO authorization flag. Ignore resumes the
+ * ordinary web request instead of presenting AuthKit's unusable native sheet
+ * from an anonymous Java host. The enum and block parameter are NSInteger-sized
+ * in WebKit's ABI.
  */
 - (void)_webView:(WKWebView *)webView
     decidePolicyForSOAuthorizationLoadWithCurrentPolicy:(NSInteger)currentPolicy
@@ -1327,6 +1408,11 @@ static void ConfigureProxy(WKWebsiteDataStore *dataStore, int proxyPort, int pro
                     : nw_proxy_config_create_http_connect(endpoint, nil);
                 if (proxy != nil) nw_proxy_config_set_failover_allowed(proxy, false);
                 dataStore.proxyConfigurations = proxy == nil ? @[] : @[proxy];
+                if (getenv("RIGEL_PROXY_DIAGNOSTICS") != NULL) {
+                    NSLog(@"[Rigel proxy diagnostics] WebKit proxy mode=%@ port=%d created=%d",
+                          proxyMode == RIGEL_WK_PROXY_SOCKS5 ? @"socks5" : @"http-connect",
+                          proxyPort, proxy != nil);
+                }
             } else {
                 dataStore.proxyConfigurations = @[];
             }
@@ -1515,6 +1601,8 @@ void *rigel_wk_create(uintptr_t parentView, uint64_t token,
     controller.policyCallback = policyCallback;
     controller.downloadDirectory = @"~/Downloads";
     controller.downloads = [NSMutableDictionary dictionary];
+    controller.additionalUserScripts = [NSMutableArray array];
+    controller.processTerminationHistory = [NSMapTable weakToStrongObjectsMapTable];
 
     WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
     configuration.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
@@ -1531,7 +1619,6 @@ void *rigel_wk_create(uintptr_t parentView, uint64_t token,
     if (@available(macOS 11.3, *)) {
         configuration.preferences.textInteractionEnabled = YES;
     }
-    DisableExtensibleSSO(configuration.preferences);
     if ([configuration respondsToSelector:@selector(setMediaTypesRequiringUserActionForPlayback:)]) {
         configuration.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;
     }
@@ -1591,6 +1678,9 @@ void rigel_wk_set_av1_normalization(void *handle, int enabled) {
     WKUserContentController *scripts = controller.webView.configuration.userContentController;
     [scripts removeAllUserScripts];
     InstallUserScripts(scripts, normalizeAllSites);
+    for (WKUserScript *script in controller.additionalUserScripts) {
+        [scripts addUserScript:script];
+    }
 
     NSString *value = normalizeAllSites ? @"true" : @"false";
     NSString *javascript = [NSString stringWithFormat:
@@ -1670,6 +1760,17 @@ void rigel_wk_destroy(void *handle) {
     controller.scriptCallback = NULL;
     controller.policyCallback = NULL;
     CFBridgingRelease(handle);
+}
+
+/* Test-only hook: simulates WebKit's termination delegate callback. */
+__attribute__((visibility("default")))
+int rigel_wk_test_simulate_content_process_termination(void *handle) {
+    if (getenv("RIGEL_WK_LIFECYCLE_TEST") == NULL) return 0;
+    RigelWKController *controller = Controller(handle);
+    WKWebView *webView = controller.webView;
+    if (webView == nil) return 0;
+    [controller webViewWebContentProcessDidTerminate:webView];
+    return 1;
 }
 
 __attribute__((visibility("default")))
@@ -1759,6 +1860,23 @@ void rigel_wk_execute(void *handle, const char *javascript) {
     if (controller == nil || javascript == NULL) return;
     [controller.webView evaluateJavaScript:[NSString stringWithUTF8String:javascript]
                          completionHandler:nil];
+}
+
+__attribute__((visibility("default")))
+int rigel_wk_add_user_script(void *handle, const char *javascript, int mainFrameOnly) {
+    RigelWKController *controller = Controller(handle);
+    if (controller == nil || controller.webView == nil || javascript == NULL) return 0;
+    NSString *source = [NSString stringWithUTF8String:javascript];
+    if (source == nil || source.length == 0) return 0;
+    WKUserScript *script = [[WKUserScript alloc]
+        initWithSource:source
+        injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+        forMainFrameOnly:mainFrameOnly != 0];
+    if (controller.additionalUserScripts == nil)
+        controller.additionalUserScripts = [NSMutableArray array];
+    [controller.additionalUserScripts addObject:script];
+    [controller.webView.configuration.userContentController addUserScript:script];
+    return 1;
 }
 
 __attribute__((visibility("default")))

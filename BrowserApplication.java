@@ -30,15 +30,10 @@ public final class BrowserApplication {
         RigelBrowser.configureContentBlocking(settings.isBlocklistEnabled());
         Blocklist blocklist = new Blocklist(settings.isBlocklistEnabled());
         proxyServer = new ProxyServer(blocklist);
-        proxyServer.start();
-        if (!settings.getUpstreamHost().isEmpty() && settings.getUpstreamPort() > 0) {
-            proxyServer.setUpstream(
-                    ProxyServer.UpstreamType.fromSetting(settings.getUpstreamType()),
-                    settings.getUpstreamHost(), settings.getUpstreamPort());
-        }
-        configureWebRouting();
-
         try {
+            proxyServer.start();
+            restorePersistedUpstream();
+            configureWebRouting();
             openWindow(true);
             while (!display.isDisposed() && !windows.isEmpty()) {
                 if (!display.readAndDispatch()) display.sleep();
@@ -48,12 +43,35 @@ public final class BrowserApplication {
         }
     }
 
+    private void restorePersistedUpstream() {
+        String host = settings.getUpstreamHost().trim();
+        if (host.isEmpty()) {
+            if (!settings.getUpstreamHost().isEmpty()) settings.clearUpstream();
+            return;
+        }
+        int port = settings.getUpstreamPort();
+        if (port < 1 || port > 65535) {
+            System.err.println("[Rigel] Ignoring invalid saved upstream proxy; using DIRECT");
+            settings.clearUpstream();
+            return;
+        }
+        try {
+            proxyServer.setUpstream(
+                    ProxyServer.UpstreamType.fromSetting(settings.getUpstreamType()), host, port);
+        } catch (IllegalArgumentException invalid) {
+            System.err.println("[Rigel] Ignoring invalid saved upstream proxy; using DIRECT: "
+                    + invalid.getMessage());
+            proxyServer.clearUpstream();
+            settings.clearUpstream();
+        }
+    }
+
     private void configureWebRouting() {
-        // WebKit talks straight to LittleProxy using HTTP CONNECT. LittleProxy
-        // then either connects directly (Chrome-style DIRECT behavior) or uses
-        // the configured upstream. This preserves one local proxy hop for all
-        // sites without the former SOCKS-to-HTTP loopback adapter.
-        RigelBrowser.configureProxy(proxyServer.getLocalPort(), RigelBrowser.PROXY_HTTP);
+        // WebKit uses Rigel's loopback SOCKS5 ingress. TCP CONNECT requests are
+        // forwarded through LittleProxy so the blocklist and upstream routing
+        // stay unchanged; UDP ASSOCIATE is handled by the SOCKS5 relay.
+        RigelBrowser.configureProxy(
+                proxyServer.getBrowserProxyPort(), RigelBrowser.PROXY_SOCKS5);
     }
 
     private void openWindow(boolean restoreSession) {

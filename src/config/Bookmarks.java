@@ -1,9 +1,12 @@
 package config;
 
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 
 /**
@@ -14,6 +17,12 @@ import java.util.List;
  * tabs and newlines on add so the format can't be corrupted.
  */
 public class Bookmarks {
+
+    private static final int MAX_ENTRIES = 2000;
+    private static final int MAX_TITLE_CODE_POINTS = 512;
+    private static final int MAX_URL_CODE_POINTS = 4096;
+    private static final int MAX_LINE_CHARS = 16_384;
+    private static final long MAX_FILE_BYTES = 16L * 1024L * 1024L;
 
     public static class Entry {
         public final String title;
@@ -29,12 +38,31 @@ public class Bookmarks {
     private void load() {
         entries.clear();
         if (!Files.exists(file)) return;
+        Deque<Entry> recent = new ArrayDeque<>(MAX_ENTRIES);
+        boolean trimmed = false;
         try {
-            for (String line : Files.readAllLines(file)) {
-                int tab = line.indexOf('\t');
-                if (tab <= 0) continue;
-                entries.add(new Entry(line.substring(0, tab), line.substring(tab + 1)));
+            if (Files.size(file) > MAX_FILE_BYTES) {
+                System.err.println("[Rigel] Bookmarks file is too large; ignoring it");
+                return;
             }
+            try (BufferedReader reader = Files.newBufferedReader(file)) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (line.length() > MAX_LINE_CHARS) continue;
+                    int tab = line.indexOf('\t');
+                    if (tab <= 0) continue;
+                    String title = clean(line.substring(0, tab), MAX_TITLE_CODE_POINTS);
+                    String url = clean(line.substring(tab + 1), MAX_URL_CODE_POINTS);
+                    if (title.isEmpty() || url.isEmpty()) continue;
+                    if (recent.size() == MAX_ENTRIES) {
+                        recent.removeFirst();
+                        trimmed = true;
+                    }
+                    recent.addLast(new Entry(title, url));
+                }
+            }
+            entries.addAll(recent);
+            if (trimmed) save();
         } catch (IOException e) {
             System.err.println("[Rigel] Could not read bookmarks: " + e.getMessage());
         }
@@ -50,28 +78,33 @@ public class Bookmarks {
         }
     }
 
-    private static String clean(String s) {
-        return s == null ? "" : s.replace('\t', ' ').replace('\n', ' ').replace('\r', ' ').trim();
+    private static String clean(String s, int maxCodePoints) {
+        String clean = s == null ? "" : s.replace('\t', ' ').replace('\n', ' ').replace('\r', ' ').trim();
+        int count = clean.codePointCount(0, clean.length());
+        return count <= maxCodePoints
+                ? clean : clean.substring(0, clean.offsetByCodePoints(0, maxCodePoints));
     }
 
     public synchronized void add(String title, String url) {
-        String u = clean(url);
+        String u = clean(url, MAX_URL_CODE_POINTS);
         if (u.isEmpty()) return;
-        String t = clean(title);
-        if (t.isEmpty()) t = u;
+        String t = clean(title, MAX_TITLE_CODE_POINTS);
+        if (t.isEmpty()) t = clean(u, MAX_TITLE_CODE_POINTS);
         // De-dupe by URL
         for (Entry e : entries) if (e.url.equals(u)) return;
+        while (entries.size() >= MAX_ENTRIES) entries.remove(0);
         entries.add(new Entry(t, u));
         save();
     }
 
     public synchronized void remove(String url) {
-        entries.removeIf(e -> e.url.equals(url));
+        String u = clean(url, MAX_URL_CODE_POINTS);
+        entries.removeIf(e -> e.url.equals(u));
         save();
     }
 
     public synchronized boolean contains(String url) {
-        String u = clean(url);
+        String u = clean(url, MAX_URL_CODE_POINTS);
         for (Entry e : entries) if (e.url.equals(u)) return true;
         return false;
     }

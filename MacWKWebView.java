@@ -69,6 +69,7 @@ final class MacWKWebView extends Composite {
                                 EventCallback eventCallback, ScriptCallback scriptCallback,
                                 PolicyCallback policyCallback);
         void rigel_wk_destroy(Pointer handle);
+        int rigel_wk_test_simulate_content_process_termination(Pointer handle);
         int rigel_wk_load_url(Pointer handle, String url);
         int rigel_wk_load_html(Pointer handle, String html);
         void rigel_wk_back(Pointer handle);
@@ -82,6 +83,7 @@ final class MacWKWebView extends Composite {
         void rigel_wk_focus(Pointer handle);
         int rigel_wk_edit_action(Pointer handle, int action);
         void rigel_wk_execute(Pointer handle, String javascript);
+        int rigel_wk_add_user_script(Pointer handle, String javascript, int mainFrameOnly);
         void rigel_wk_evaluate(Pointer handle, String javascript, long evalToken,
                                EvalCallback callback);
     }
@@ -140,15 +142,20 @@ final class MacWKWebView extends Composite {
             throw new IllegalStateException("SWT did not provide a native NSView host");
 
         VIEWS.put(token, this);
-        int proxyPort = Integer.getInteger("rigel.proxy.port", 8888);
-        int proxyMode = Integer.getInteger("rigel.proxy.mode", RigelBrowser.PROXY_HTTP);
-        int mode = (normalizeAv1AllSites ? 1 : 0) | (contentBlockingEnabled ? 2 : 0);
-        handle = nativeBridge.rigel_wk_create(view.id, token, proxyPort, proxyMode,
-                mode, 0L,
-                EVENT_CALLBACK, SCRIPT_CALLBACK, POLICY_CALLBACK);
-        if (handle == null) {
+        try {
+            int proxyPort = Integer.getInteger("rigel.proxy.port", 8888);
+            int proxyMode = Integer.getInteger("rigel.proxy.mode", RigelBrowser.PROXY_HTTP);
+            int mode = (normalizeAv1AllSites ? 1 : 0) | (contentBlockingEnabled ? 2 : 0);
+            handle = nativeBridge.rigel_wk_create(view.id, token, proxyPort, proxyMode,
+                    mode, 0L,
+                    EVENT_CALLBACK, SCRIPT_CALLBACK, POLICY_CALLBACK);
+            if (handle == null)
+                throw new IllegalStateException("Could not create WKWebView");
+        } catch (Throwable failure) {
             VIEWS.remove(token);
-            throw new IllegalStateException("Could not create WKWebView");
+            if (failure instanceof RuntimeException runtime) throw runtime;
+            if (failure instanceof Error error) throw error;
+            throw new IllegalStateException("Could not create WKWebView", failure);
         }
 
         addControlListener(new ControlAdapter() {
@@ -221,6 +228,10 @@ final class MacWKWebView extends Composite {
     void reload() { if (usable()) bridge().rigel_wk_reload(handle); }
     void reloadFromOrigin() { if (usable()) bridge().rigel_wk_reload_from_origin(handle); }
     void stopLoading() { if (usable()) bridge().rigel_wk_stop(handle); }
+    boolean simulateContentProcessTerminationForTesting() {
+        if (!Boolean.getBoolean("rigel.tests.allowContentProcessTermination")) return false;
+        return usable() && bridge().rigel_wk_test_simulate_content_process_termination(handle) != 0;
+    }
     boolean canGoBack() { return usable() && bridge().rigel_wk_can_back(handle) != 0; }
     boolean canGoForward() { return usable() && bridge().rigel_wk_can_forward(handle) != 0; }
 
@@ -228,6 +239,11 @@ final class MacWKWebView extends Composite {
         if (!usable() || javascript == null) return false;
         bridge().rigel_wk_execute(handle, javascript);
         return true;
+    }
+
+    boolean addDocumentStartScript(String javascript) {
+        return usable() && javascript != null && !javascript.isBlank()
+                && bridge().rigel_wk_add_user_script(handle, javascript, 0) != 0;
     }
 
     void evaluateAsync(String javascript, BiConsumer<String, String> completion) {
@@ -339,13 +355,17 @@ final class MacWKWebView extends Composite {
                 && fullDigest.equals(HexFormat.of().formatHex(
                         MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(output))));
         if (!validExisting) {
-            Path temporary = directory.resolve("libRigelWKWebView.dylib.tmp");
-            Files.write(temporary, bytes);
+            Path temporary = Files.createTempFile(directory, "libRigelWKWebView.", ".tmp");
             try {
-                Files.move(temporary, output, StandardCopyOption.REPLACE_EXISTING,
-                        StandardCopyOption.ATOMIC_MOVE);
-            } catch (AtomicMoveNotSupportedException ignored) {
-                Files.move(temporary, output, StandardCopyOption.REPLACE_EXISTING);
+                Files.write(temporary, bytes);
+                try {
+                    Files.move(temporary, output, StandardCopyOption.REPLACE_EXISTING,
+                            StandardCopyOption.ATOMIC_MOVE);
+                } catch (AtomicMoveNotSupportedException ignored) {
+                    Files.move(temporary, output, StandardCopyOption.REPLACE_EXISTING);
+                }
+            } finally {
+                Files.deleteIfExists(temporary);
             }
         }
         output.toFile().setReadable(true, true);

@@ -7,12 +7,16 @@ import org.littleshoot.proxy.HttpProxyServer;
 import org.littleshoot.proxy.impl.DefaultHttpProxyServer;
 
 import io.netty.handler.codec.http.DefaultFullHttpResponse;
+import io.netty.handler.codec.http.HttpHeaderNames;
+import io.netty.handler.codec.http.HttpHeaderValues;
+import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpObject;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpResponse;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpVersion;
 
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 
 /**
@@ -20,8 +24,9 @@ import java.net.InetSocketAddress;
  *
  *   - getUpstreamHost() / getUpstreamPort() let BrowserUI pre-fill the proxy
  *     dialog when an upstream is already configured.
- *   - A toggleable host Blocklist short-circuits ad/tracker hosts with a 204
- *     when enabled. Disabled by default; when off the filter is a pass-through.
+ *   - A toggleable host Blocklist short-circuits ordinary ad/tracker requests
+ *     with a 204 and rejects blocked CONNECT tunnels. Disabled by default;
+ *     when off the filter is a pass-through.
  */
 public class ProxyServer {
 
@@ -50,13 +55,23 @@ public class ProxyServer {
     private volatile int localPort = DEFAULT_LOCAL_PORT;
     private volatile Upstream upstream;
     private final Blocklist blocklist;
+    private final int preferredLocalPort;
+    private LoopbackSocks5Server browserProxy;
 
     public ProxyServer() {
-        this(new Blocklist(false));
+        this(new Blocklist(false), DEFAULT_LOCAL_PORT);
     }
 
     public ProxyServer(Blocklist blocklist) {
+        this(blocklist, DEFAULT_LOCAL_PORT);
+    }
+
+    /** Allows deterministic tests to use an isolated preferred HTTP port. */
+    public ProxyServer(Blocklist blocklist, int preferredLocalPort) {
+        if (preferredLocalPort < 1 || preferredLocalPort > 65535)
+            throw new IllegalArgumentException("Invalid preferred local proxy port");
         this.blocklist = blocklist;
+        this.preferredLocalPort = preferredLocalPort;
     }
 
     public Blocklist getBlocklist() { return blocklist; }
@@ -65,9 +80,10 @@ public class ProxyServer {
 
     public synchronized void start() {
         if (server != null) return;
+        if (browserProxy == null) browserProxy = new LoopbackSocks5Server(this);
         Throwable defaultPortFailure = null;
         try {
-            server = startOnPort(DEFAULT_LOCAL_PORT);
+            server = startOnPort(preferredLocalPort);
         } catch (Throwable failure) {
             defaultPortFailure = failure;
             try {
@@ -78,11 +94,22 @@ public class ProxyServer {
             }
         }
         localPort = server.getListenAddress().getPort();
-        if (localPort != DEFAULT_LOCAL_PORT) {
-            System.err.println("[Rigel] Port " + DEFAULT_LOCAL_PORT
+        if (localPort != preferredLocalPort) {
+            System.err.println("[Rigel] Port " + preferredLocalPort
                     + " was unavailable; using 127.0.0.1:" + localPort);
         }
         System.out.println("[Rigel] Proxy running on 127.0.0.1:" + localPort);
+        try {
+            browserProxy.start(localPort);
+            System.out.println("[Rigel] Browser SOCKS5 proxy running on 127.0.0.1:"
+                    + browserProxy.getLocalPort());
+        } catch (Throwable failure) {
+            browserProxy.close();
+            HttpProxyServer running = server;
+            server = null;
+            if (running != null) running.stop();
+            throw new IllegalStateException("Could not start the Rigel browser proxy", failure);
+        }
     }
 
     private HttpProxyServer startOnPort(int port) {
@@ -110,14 +137,27 @@ public class ProxyServer {
                                         // URI is the "host:port" authority; the Host header
                                         // may be absent. Check both so HTTPS ad/tracker
                                         // hosts are caught at tunnel-open, not just HTTP.
+                                        boolean connect = HttpMethod.CONNECT.equals(req.method());
                                         boolean blocked = blocklist.isBlocked(host);
-                                        if (!blocked && io.netty.handler.codec.http.HttpMethod.CONNECT.equals(req.method())) {
+                                        if (!blocked && connect) {
                                             blocked = blocklist.isBlocked(req.uri());
                                         }
                                         if (blocked) {
-                                            // Empty 204 - site keeps working, ad call dropped
-                                            return new DefaultFullHttpResponse(
-                                                HttpVersion.HTTP_1_1, HttpResponseStatus.NO_CONTENT);
+                                            // A CONNECT needs a non-2xx response or SOCKS clients
+                                            // will treat the blocked tunnel as established.
+                                            HttpResponseStatus status = connect
+                                                    ? HttpResponseStatus.FORBIDDEN
+                                                    : HttpResponseStatus.NO_CONTENT;
+                                            DefaultFullHttpResponse response =
+                                                    new DefaultFullHttpResponse(
+                                                            HttpVersion.HTTP_1_1, status);
+                                            if (connect) {
+                                                response.headers().set(
+                                                        HttpHeaderNames.CONTENT_LENGTH, 0);
+                                                response.headers().set(HttpHeaderNames.CONNECTION,
+                                                        HttpHeaderValues.CLOSE);
+                                            }
+                                            return response;
                                         }
                                     }
                                     return null; // null = allow request to proceed
@@ -129,6 +169,7 @@ public class ProxyServer {
     }
 
     public synchronized void stop() {
+        if (browserProxy != null) browserProxy.close();
         HttpProxyServer running = server;
         server = null;
         if (running != null) {
@@ -138,6 +179,22 @@ public class ProxyServer {
     }
 
     public int getLocalPort() { return localPort; }
+    public int getBrowserProxyPort() {
+        LoopbackSocks5Server running = browserProxy;
+        return running == null ? -1 : running.getLocalPort();
+    }
+    public long getBrowserConnectRequestCount() {
+        LoopbackSocks5Server running = browserProxy;
+        return running == null ? 0 : running.getConnectRequestCount();
+    }
+    public long getBrowserUdpAssociationRequestCount() {
+        LoopbackSocks5Server running = browserProxy;
+        return running == null ? 0 : running.getUdpAssociationRequestCount();
+    }
+    public int getActiveBrowserConnectionCount() {
+        LoopbackSocks5Server running = browserProxy;
+        return running == null ? 0 : running.getActiveClientCount();
+    }
 
     // Upstream control
 
@@ -149,13 +206,48 @@ public class ProxyServer {
         String cleanHost = host == null ? "" : host.trim();
         if (type == null || cleanHost.isEmpty() || port < 1 || port > 65535)
             throw new IllegalArgumentException("Invalid upstream proxy address");
-        upstream = new Upstream(type, cleanHost, port);
+        if (pointsAtLocalListener(cleanHost, port))
+            throw new IllegalArgumentException(
+                    "Upstream proxy cannot point to Rigel's own local listener");
+        Upstream next = new Upstream(type, cleanHost, port);
+        if (next.equals(upstream)) return;
+        upstream = next;
+        resetBrowserSessions();
         System.out.println("[Rigel] Upstream set -> " + type + " " + cleanHost + ":" + port);
     }
 
     public synchronized void clearUpstream() {
-        if (upstream != null) System.out.println("[Rigel] Upstream cleared -> DIRECT");
+        if (upstream == null) return;
         upstream = null;
+        resetBrowserSessions();
+        System.out.println("[Rigel] Upstream cleared -> DIRECT");
+    }
+
+    private boolean pointsAtLocalListener(String host, int port) {
+        HttpProxyServer runningHttp = server;
+        int httpPort = runningHttp == null ? -1 : localPort;
+        LoopbackSocks5Server runningBrowser = browserProxy;
+        int browserPort = runningBrowser == null ? -1 : runningBrowser.getLocalPort();
+        if (port != httpPort && port != browserPort) return false;
+
+        String candidate = host;
+        if (candidate.length() > 1 && candidate.charAt(0) == '['
+                && candidate.charAt(candidate.length() - 1) == ']') {
+            candidate = candidate.substring(1, candidate.length() - 1);
+        }
+        try {
+            for (InetAddress address : InetAddress.getAllByName(candidate)) {
+                if (address.isLoopbackAddress() || address.isAnyLocalAddress()) return true;
+            }
+        } catch (Exception ignored) {
+            // An unresolved upstream will fail normally when a request uses it.
+        }
+        return false;
+    }
+
+    private void resetBrowserSessions() {
+        LoopbackSocks5Server running = browserProxy;
+        if (running != null) running.resetActiveSessions();
     }
 
     public boolean isUsingUpstream() { return upstream != null; }

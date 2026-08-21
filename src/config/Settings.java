@@ -8,7 +8,9 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.net.URI;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 
 /**
@@ -26,6 +28,11 @@ public class Settings {
 
     public static final Path DIR  = distRoot().resolve("portable-data").resolve("profile");
     public static final Path FILE = DIR.resolve("settings.properties");
+
+    private static final long MAX_SETTINGS_FILE_BYTES = 4L * 1024L * 1024L;
+    private static final int MAX_HOME_SHORTCUTS = 64;
+    private static final int MAX_SESSION_URLS = 50;
+    private static final int MAX_SESSION_URL_LENGTH = 4096;
 
     // ── Keys ─────────────────────────────────────────────────────────────────
     private static final String K_HOMEPAGE      = "homepage";
@@ -93,12 +100,21 @@ public class Settings {
     // ── Load / save ──────────────────────────────────────────────────────────
 
     private void load() {
-        if (Files.exists(FILE)) {
+        props.clear();
+        if (!Files.exists(FILE)) return;
+        try {
+            if (Files.size(FILE) > MAX_SETTINGS_FILE_BYTES) {
+                System.err.println("[Rigel] Settings file is too large; using defaults");
+                return;
+            }
             try (InputStream in = Files.newInputStream(FILE)) {
                 props.load(in);
-            } catch (IOException e) {
-                System.err.println("[Rigel] Could not read settings: " + e.getMessage());
             }
+        } catch (IOException | IllegalArgumentException e) {
+            // Properties.load may leave keys parsed before a malformed Unicode
+            // escape. Never run with a partially loaded profile.
+            props.clear();
+            System.err.println("[Rigel] Could not read settings; using defaults: " + e.getMessage());
         }
     }
 
@@ -191,19 +207,25 @@ public class Settings {
     public String getUpstreamHost() { return props.getProperty(K_UPSTREAM_HOST, ""); }
     public String getUpstreamType() { return props.getProperty(K_UPSTREAM_TYPE, "http"); }
     public int    getUpstreamPort() {
-        try { return Integer.parseInt(props.getProperty(K_UPSTREAM_PORT, "-1")); }
+        try {
+            int port = Integer.parseInt(props.getProperty(K_UPSTREAM_PORT, "-1"));
+            return validPort(port) ? port : -1;
+        }
         catch (NumberFormatException e) { return -1; }
     }
     public void setUpstream(String host, int port) {
         setUpstream("http", host, port);
     }
     public void setUpstream(String type, String host, int port) {
+        if (!validPort(port))
+            throw new IllegalArgumentException("Upstream proxy port must be between 1 and 65535");
         props.setProperty(K_UPSTREAM_TYPE,
                 type == null || type.isBlank() ? "http" : type.trim().toLowerCase());
         props.setProperty(K_UPSTREAM_HOST, host == null ? "" : host);
         props.setProperty(K_UPSTREAM_PORT, Integer.toString(port));
         save();
     }
+    private static boolean validPort(int port) { return port >= 1 && port <= 65535; }
     public void clearUpstream() {
         props.remove(K_UPSTREAM_TYPE);
         props.remove(K_UPSTREAM_HOST);
@@ -248,7 +270,7 @@ public class Settings {
     public void setHomeShortcutsEnabled(boolean v) { props.setProperty(K_HOME_SHORTCUTS_ON, Boolean.toString(v)); save(); }
 
     public String getHomeShortcutsText() {
-        return props.getProperty(K_HOME_SHORTCUTS, DEFAULT_HOME_SHORTCUTS);
+        return normalizeShortcuts(props.getProperty(K_HOME_SHORTCUTS, DEFAULT_HOME_SHORTCUTS));
     }
     public static String defaultHomeShortcutsText() {
         return DEFAULT_HOME_SHORTCUTS;
@@ -283,6 +305,7 @@ public class Settings {
             icon = limitCodePoints(icon, 8);
             if (icon.isEmpty()) icon = defaultShortcutIcon(title);
             lines.add(title + " | " + url + " | " + icon);
+            if (lines.size() >= MAX_HOME_SHORTCUTS) break;
         }
         return String.join("\n", lines);
     }
@@ -302,6 +325,7 @@ public class Settings {
             url = limitCodePoints(url, 2048);
             icon = limitCodePoints(icon, 8);
             shortcuts.add(new Shortcut(title, normalizeShortcutUrl(url), icon.isEmpty() ? defaultShortcutIcon(title) : icon));
+            if (shortcuts.size() >= MAX_HOME_SHORTCUTS) break;
         }
         return shortcuts;
     }
@@ -451,38 +475,89 @@ public class Settings {
     }
 
     public List<String> getSessionUrls() {
-        String raw = props.getProperty(K_SESSION_URLS, "");
-        List<String> urls = new ArrayList<>();
-        for (String line : raw.split("\\R")) {
-            String url = line.trim();
-            if (!url.isEmpty()) urls.add(url);
-        }
-        return urls;
+        return storedSession().urls;
     }
 
     public int getSessionActiveIndex() {
-        try { return Integer.parseInt(props.getProperty(K_SESSION_INDEX, "0")); }
-        catch (NumberFormatException e) { return 0; }
+        return storedSession().activeIndex;
     }
 
     public void setSession(List<String> urls, int activeIndex) {
-        List<String> safe = new ArrayList<>();
-        if (urls != null) {
-            for (String url : urls) {
-                if (url == null) continue;
-                String clean = url.replace('\n', ' ').replace('\r', ' ').trim();
-                if (!clean.isEmpty()) safe.add(clean);
-            }
-        }
+        SessionData session = sanitizeSession(urls == null ? List.of() : urls, activeIndex);
+        List<String> safe = session.urls;
         if (safe.isEmpty()) {
             props.remove(K_SESSION_URLS);
             props.remove(K_SESSION_INDEX);
         } else {
             props.setProperty(K_SESSION_URLS, String.join("\n", safe));
-            int idx = Math.max(0, Math.min(activeIndex, safe.size() - 1));
-            props.setProperty(K_SESSION_INDEX, Integer.toString(idx));
+            props.setProperty(K_SESSION_INDEX, Integer.toString(session.activeIndex));
         }
         save();
+    }
+
+    private SessionData storedSession() {
+        int requestedIndex;
+        try {
+            requestedIndex = Integer.parseInt(props.getProperty(K_SESSION_INDEX, "0"));
+        } catch (NumberFormatException ignored) {
+            requestedIndex = 0;
+        }
+        String raw = props.getProperty(K_SESSION_URLS, "");
+        return sanitizeSession(raw.lines()::iterator, requestedIndex);
+    }
+
+    private static SessionData sanitizeSession(Iterable<String> candidates, int requestedIndex) {
+        List<String> safe = new ArrayList<>();
+        Map<String, Integer> safeIndexes = new LinkedHashMap<>();
+        int safeActiveIndex = 0;
+        long nearestActiveDistance = Long.MAX_VALUE;
+        int originalIndex = 0;
+        for (String candidate : candidates) {
+            String clean = sanitizeSessionUrl(candidate);
+            if (!clean.isEmpty()) {
+                Integer restoredIndex = safeIndexes.get(clean);
+                if (restoredIndex == null && safe.size() < MAX_SESSION_URLS) {
+                    restoredIndex = safe.size();
+                    safeIndexes.put(clean, restoredIndex);
+                    safe.add(clean);
+                }
+                if (restoredIndex != null) {
+                    long distance = Math.abs((long) originalIndex - Math.max(0, requestedIndex));
+                    if (distance < nearestActiveDistance) {
+                        nearestActiveDistance = distance;
+                        safeActiveIndex = restoredIndex;
+                    }
+                }
+            }
+            originalIndex++;
+        }
+        return new SessionData(safe, safeActiveIndex);
+    }
+
+    private record SessionData(List<String> urls, int activeIndex) {}
+
+    private static String sanitizeSessionUrl(String value) {
+        if (value == null) return "";
+        String clean = value.replace('\n', ' ').replace('\r', ' ').trim();
+        if (clean.isEmpty() || clean.length() > MAX_SESSION_URL_LENGTH) return "";
+        if (clean.equalsIgnoreCase("rigel://home")) return "rigel://home";
+        if (clean.equalsIgnoreCase("about:blank")) return "about:blank";
+        try {
+            URI uri = URI.create(clean);
+            String scheme = uri.getScheme();
+            if (scheme == null) return "";
+            if (scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https")) {
+                int port = uri.getPort();
+                return uri.getHost() != null && !uri.getHost().isBlank()
+                        && (port == -1 || validPort(port)) ? clean : "";
+            }
+            if (scheme.equalsIgnoreCase("file")) {
+                String target = uri.getRawSchemeSpecificPart();
+                return target != null && !target.isBlank() ? clean : "";
+            }
+        } catch (IllegalArgumentException ignored) {
+        }
+        return "";
     }
 
     public void clearSession() {

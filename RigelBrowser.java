@@ -80,6 +80,7 @@ public final class RigelBrowser extends Composite {
     private CloseHandler closeHandler;
     private String currentUrl = "about:blank";
     private String currentTitle = "";
+    private boolean contentProcessReloadPending;
     public RigelBrowser(Composite parent, int style) {
         super(parent, style);
         setLayout(new FillLayout());
@@ -245,6 +246,14 @@ public final class RigelBrowser extends Composite {
                 : swtBrowser.execute(javascript);
     }
 
+    /** Installs a document-start script in every frame of future WK pages. */
+    boolean addDocumentStartScript(String javascript) {
+        if (javascript == null || javascript.isBlank() || isDisposed()) return false;
+        // SWT has no equivalent persistent all-frame hook. Its fallback is
+        // injected after each completed navigation by TabManager.
+        return backend != Backend.WKWEBVIEW || wkWebView.addDocumentStartScript(javascript);
+    }
+
     public boolean performEditAction(EditAction action) {
         if (action == null || isDisposed()) return false;
         if (backend == Backend.WKWEBVIEW) {
@@ -274,6 +283,23 @@ public final class RigelBrowser extends Composite {
         else swtBrowser.execute("try{window.location.reload(true);}catch(e){window.location.reload();}");
     }
     public void stop() { if (backend == Backend.WKWEBVIEW) wkWebView.stopLoading(); else swtBrowser.stop(); }
+
+    /** Reload a background WKWebView whose content process was reclaimed. */
+    void resumeAfterContentProcessTermination() {
+        if (backend != Backend.WKWEBVIEW || !contentProcessReloadPending || isDisposed()) return;
+        contentProcessReloadPending = false;
+        wkWebView.reload();
+    }
+
+    boolean simulateContentProcessTerminationForTesting() {
+        return backend == Backend.WKWEBVIEW
+                && wkWebView.simulateContentProcessTerminationForTesting();
+    }
+
+    boolean isContentProcessReloadPendingForTesting() {
+        return contentProcessReloadPending;
+    }
+
     public boolean isBackEnabled() {
         return backend == Backend.WKWEBVIEW ? wkWebView.canGoBack() : swtBrowser.isBackEnabled();
     }
@@ -313,6 +339,7 @@ public final class RigelBrowser extends Composite {
     private void handleNativeEvent(int type, String first, String second) {
         switch (type) {
             case MacWKWebView.LOAD_STARTED -> {
+                contentProcessReloadPending = false;
                 updateLocationAndTitle(first, "", false);
                 for (ProgressListener listener : List.copyOf(progressListeners)) listener.changed(10, 100);
             }
@@ -326,8 +353,10 @@ public final class RigelBrowser extends Composite {
             }
             case MacWKWebView.LOCATION -> updateLocationAndTitle(first, second, true);
             case MacWKWebView.CLOSED -> { if (closeHandler != null) closeHandler.close(); }
-            case MacWKWebView.PROCESS_RESTARTED ->
-                    System.err.println("[Rigel] WKWebView content process restarted");
+            case MacWKWebView.PROCESS_RESTARTED -> {
+                contentProcessReloadPending = true;
+                System.err.println("[Rigel] WKWebView content process restarted");
+            }
             default -> {}
         }
     }

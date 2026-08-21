@@ -12,6 +12,7 @@ import org.eclipse.swt.internal.cocoa.OS;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Shell;
 
+import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -190,12 +191,20 @@ final class MacWindowCaptureProtection {
             long count = OS.objc_msgSend(windows, OS.sel_registerName("count"));
             long objectAtIndex = OS.sel_registerName("objectAtIndex:");
             long windowNumberSelector = OS.sel_registerName("windowNumber");
+            Map<Long, Long> liveWindows = new HashMap<>();
             for (long index = 0; index < count; index++) {
                 long window = OS.objc_msgSend(windows, objectAtIndex, index);
                 if (window == 0) continue;
                 long windowNumber = OS.objc_msgSend(window, windowNumberSelector);
-                if (windowNumber > 0) protectWindowOnce(window, windowNumber);
+                if (windowNumber > 0) {
+                    liveWindows.put(Long.valueOf(windowNumber), Long.valueOf(window));
+                    protectWindowOnce(window, windowNumber);
+                }
             }
+            PROTECTED_WINDOWS.entrySet().removeIf(entry ->
+                    !entry.getValue().equals(liveWindows.get(entry.getKey())));
+            PENDING_WINDOWS.entrySet().removeIf(entry ->
+                    !entry.getValue().equals(liveWindows.get(entry.getKey())));
         } catch (Throwable ignored) {
             // Native fullscreen can replace a temporary window during this loop;
             // the bounded transition retries will discover its replacement.

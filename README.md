@@ -57,8 +57,9 @@ the diagnostic launcher.
 - Smart address resolution: public hosts default to HTTPS, while private IPs
   and local names use HTTP for router and device admin pages.
 - Optional built-in WebKit ad/tracker content blocker, disabled by default.
-- Always-on local HTTP CONNECT proxy with Chrome-style direct routing, optional
-  HTTP/SOCKS4/SOCKS5 upstream chaining, and direct handling for `localhost`.
+- Always-on local SOCKS5 browser ingress with TCP and UDP support, Chrome-style
+  direct routing, optional HTTP/SOCKS4/SOCKS5 upstream chaining, and direct
+  handling for `localhost`.
 - Native-first video fullscreen and built-in media diagnostics (`Cmd+Option+M`).
 - TikTok compatibility for malformed HE-AACv2 timing, sticker comments, and
   transient empty-comment results.
@@ -104,6 +105,7 @@ downloads use the normal macOS home folder and are not stored with Rigel.
 | `settings.properties` | Preferences such as homepage, layout, search engine, proxy, zoom, and toggles |
 | `bookmarks.tsv` | Saved bookmarks in `title<TAB>url` format |
 | `history.tsv` | Visited pages in `epochMillis<TAB>title<TAB>url` format, capped at 2000 entries |
+| `hs_err_pid*.log` | A diagnostic report created only if the JVM or native bridge crashes |
 
 These files are plain text. They are safe to edit or delete; Rigel restores
 defaults when a file is missing.
@@ -159,11 +161,28 @@ disabled by default.
 
 Rigel's local proxy normally listens on `127.0.0.1:8888`. If that port is busy,
 Rigel automatically chooses an available loopback port instead of failing to
-launch. On macOS 14 or newer, every WKWebView connects directly to that local
-HTTP CONNECT endpoint. This keeps Chrome-style proxy-direct behavior while
-removing the previous redundant local SOCKS adapter and its extra socket-copy
-loop. In Direct mode LittleProxy connects to destination servers itself; when
-an upstream is selected, it chains the same requests through that upstream.
+launch. Each WKWebView uses a separate loopback-only SOCKS5 ingress. TCP
+`CONNECT` requests pass from that ingress through LittleProxy, preserving the
+hostname blocklist, direct routing rules, and selected upstream. In Direct mode
+LittleProxy connects to destination servers itself; when an upstream is
+selected, it chains the same TCP requests through that upstream.
+
+The browser ingress implements SOCKS5 `UDP ASSOCIATE` as well. In Direct mode,
+Rigel resolves domain-form destinations on the proxy side and relays UDP from a
+network-capable socket. With a SOCKS5 upstream, it opens an upstream UDP
+association and keeps the original SOCKS5 datagram framing. HTTP and SOCKS4
+upstreams cannot carry UDP, so Rigel rejects the UDP association instead of
+silently leaking it around the selected route; web protocols that support it
+can then fall back to TCP.
+
+This still is not a VPN or a guarantee that every packet from WebKit uses the
+proxy. A live WKWebView WebRTC/ICE test on macOS produced working UDP candidates
+without asking the configured SOCKS5 proxy for a UDP association. In other
+words, normal HTTP/HTTPS website requests use Rigel's proxy, but WebRTC can use
+the Mac's direct network path. That preserves calling and peer-to-peer site
+functionality, but it can reveal the direct network path to those sites. Fully
+forcing that traffic through one tunnel requires a system-level VPN or Network
+Extension, which Rigel intentionally does not install.
 
 The optional host and port fields in Settings configure an upstream proxy.
 Leave the mode set to Direct to keep all traffic on the local Rigel proxy while
@@ -195,3 +214,10 @@ libraries are stamped with a macOS 12 deployment target so a build made on a
 newer Mac remains loadable on supported older systems. Rebuilding the native
 code requires Apple's Command Line Tools, but running the packaged browser does
 not.
+
+`./tests/run-proxy-core-test.sh` checks the HTTP route, SOCKS5 TCP and UDP
+relays, upstream behavior, and port cleanup. `./tests/run-wk-proxy-test.sh`
+additionally launches a real WKWebView and checks proxied HTTPS, WebRTC behavior,
+and a live TikTok page/video smoke test. `./tests/run-wk-lifecycle-stress-test.sh`
+exercises many tabs, deferred WebContent recovery, Google Account popup routing,
+rapid popup teardown, and capture-protection discovery.
