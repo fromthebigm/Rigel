@@ -61,6 +61,7 @@ the diagnostic launcher.
   direct routing, optional HTTP/SOCKS4/SOCKS5 upstream chaining, and direct
   handling for `localhost`.
 - Native-first video fullscreen and built-in media diagnostics (`Cmd+Option+M`).
+- Standards-compatible HTML popovers for player settings and other overlay UI.
 - TikTok compatibility for malformed HE-AACv2 timing, sticker comments, and
   transient empty-comment results.
 - WebKit-managed AV1 playback when the current macOS and Apple hardware expose
@@ -221,3 +222,7 @@ additionally launches a real WKWebView and checks proxied HTTPS, WebRTC behavior
 and a live TikTok page/video smoke test. `./tests/run-wk-lifecycle-stress-test.sh`
 exercises many tabs, deferred WebContent recovery, Google Account popup routing,
 rapid popup teardown, and capture-protection discovery.
+`./tests/run-wk-popover-fullscreen-test.sh` verifies that the bundled Java host
+exposes WebKit's HTML Popover API, that a player menu escapes transformed and
+clipped controls in app fullscreen, and that fullscreen capture protection
+remains configured with `NSWindowSharingNone`.

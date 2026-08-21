@@ -49,6 +49,37 @@ enum {
         WKNavigationActionPolicyAllow + 2
 };
 
+/*
+ * WKWebView keeps some stable web features disabled for applications linked
+ * against older SDKs. Rigel's bundled, vendor-signed Java launcher carries an
+ * SDK 13.3 load command, so WebKit otherwise hides the HTML Popover API even
+ * on a current macOS release. Use WebKit's feature SPI to opt into that one
+ * stable feature without replacing or modifying the Java executable.
+ */
+@protocol RigelWKFeatureSPI <NSObject>
+@property(nonatomic, readonly, copy) NSString *key;
+@end
+
+@interface WKPreferences (RigelFeatureSPI)
++ (NSArray<id<RigelWKFeatureSPI>> *)_features;
+- (void)_setEnabled:(BOOL)enabled forFeature:(id<RigelWKFeatureSPI>)feature;
+@end
+
+static BOOL EnablePopoverAttribute(WKPreferences *preferences) {
+    if (preferences == nil
+            || ![[WKPreferences class] respondsToSelector:@selector(_features)]
+            || ![preferences respondsToSelector:@selector(_setEnabled:forFeature:)]) {
+        return NO;
+    }
+    for (id<RigelWKFeatureSPI> feature in [WKPreferences _features]) {
+        if (![feature respondsToSelector:@selector(key)]) continue;
+        if (![feature.key isEqualToString:@"PopoverAttributeEnabled"]) continue;
+        [preferences _setEnabled:YES forFeature:feature];
+        return YES;
+    }
+    return NO;
+}
+
 static const char *Utf8(NSString *value) {
     return value == nil ? "" : value.UTF8String;
 }
@@ -1612,6 +1643,7 @@ void *rigel_wk_create(uintptr_t parentView, uint64_t token,
     configuration.suppressesIncrementalRendering = NO;
     configuration.allowsAirPlayForMediaPlayback = YES;
     configuration.preferences.javaScriptCanOpenWindowsAutomatically = YES;
+    EnablePopoverAttribute(configuration.preferences);
     if (@available(macOS 12.3, *)) {
         configuration.preferences.elementFullscreenEnabled = YES;
         configuration.preferences.siteSpecificQuirksModeEnabled = YES;
