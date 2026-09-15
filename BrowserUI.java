@@ -9,7 +9,6 @@ import org.eclipse.swt.accessibility.AccessibleControlEvent;
 import org.eclipse.swt.accessibility.AccessibleEvent;
 import org.eclipse.swt.accessibility.ACC;
 import org.eclipse.swt.custom.SashForm;
-import org.eclipse.swt.custom.StackLayout;
 import org.eclipse.swt.dnd.Clipboard;
 import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.dnd.Transfer;
@@ -43,11 +42,19 @@ public class BrowserUI {
     private static final int TOP_TAB_STRIP_HEIGHT = 34;
     private static final int NAV_BUTTON_SIZE = 32;
     private static final int NAV_ROW_HEIGHT = 46;
+    /** Reserved band under the traffic lights when glass turns the window
+     *  into a full-size-content view. Matches the native titlebar height. */
+    private static final int GLASS_TITLE_STRIP_HEIGHT = 28;
+    // Chrome paint alpha while glass is active (~38%): the material behind
+    // must dominate, with the theme only tinting it.
+    private static final int GLASS_CHROME_TINT_ALPHA = 96;
+    private static final int GLASS_SIDEBAR_TINT_ALPHA = 118;
     private static final String DATA_ACTIVE_WINDOW = "rigel.activeWindow";
     private static final String DATA_SYSTEM_MENU_WIRED = "rigel.systemMenuWired";
     private static final String DATA_ACCESSIBLE_NAME = "rigel.accessibleName";
     private static final String DATA_ACCESSIBLE_NAME_WIRED = "rigel.accessibleNameWired";
     private static final String DATA_TAB_MODEL = "rigel.tabModel";
+    private static final String DATA_TAB_INDEX = "rigel.tabIndex";
     private static final String DATA_PENDING_SETTINGS_LABEL = "rigel.pendingSettingsLabel";
     private static final java.net.http.HttpClient DOWNLOAD_CLIENT =
             java.net.http.HttpClient.newBuilder()
@@ -145,18 +152,21 @@ public class BrowserUI {
     private Text       addressBar;
     private RoundedIconLabel backBtn, fwdBtn, reloadBtn, homeBtn, layoutBtn, settingsBtn;
     private Composite  contentArea;
-    private StackLayout stackLayout;
+    private TabDeckLayout stackLayout;
     private Canvas loadProgressBar;
 
     // ── State ────────────────────────────────────────────────────────────────
 
     private TabManager  tabManager;
     private ProxyServer proxyServer;
-    private Runnable newWindowAction = () -> {};
+    private NewWindowOpener newWindowAction = (url, x, y) -> {};
     private Runnable quitAction = () -> {};
     private Runnable windowClosedAction = () -> {};
     private Runnable settingsChangedAction = () -> {};
     private boolean restoreSessionOnOpen;
+    private String  initialTabUrl;
+    private int     initialWindowX = -1;
+    private int     initialWindowY = -1;
     boolean             isFullscreen            = false;
     private boolean     sidebarMode             = false;
     private boolean     shellWasAlreadyFullscreen = false;
@@ -169,9 +179,7 @@ public class BrowserUI {
     private long        loadProgressGeneration  = 0;
     private int         statusGeneration        = 0;
     private boolean     statusVisible           = false;
-    private boolean     chromeGlassApplied      = false;
-    private boolean     navGlassApplied         = false;
-    private boolean     sidebarGlassApplied     = false;
+    private boolean     windowGlassApplied      = false;
     private boolean     appliedGlassChrome      = true;
     private int         tabResizeGeneration     = 0;
     private final List<Shell> utilityShells = new ArrayList<>();
@@ -241,15 +249,19 @@ public class BrowserUI {
 
     public void open(Display display, config.Settings sharedSettings,
                      config.Bookmarks sharedBookmarks, config.History sharedHistory,
-                     ProxyServer sharedProxy, Runnable newWindowAction,
+                     ProxyServer sharedProxy, NewWindowOpener newWindowAction,
                      Runnable quitAction, Runnable windowClosedAction,
                      Runnable settingsChangedAction,
-                     boolean restoreSession) {
+                     boolean restoreSession,
+                     String initialTabUrl, int initialX, int initialY) {
         settings = sharedSettings;
         bookmarks = sharedBookmarks;
         history = sharedHistory;
         proxyServer = sharedProxy;
         this.newWindowAction = newWindowAction;
+        this.initialTabUrl = initialTabUrl;
+        this.initialWindowX = initialX;
+        this.initialWindowY = initialY;
         this.quitAction = quitAction;
         this.windowClosedAction = windowClosedAction;
         this.settingsChangedAction = settingsChangedAction == null ? () -> {} : settingsChangedAction;
@@ -283,6 +295,18 @@ public class BrowserUI {
 
         shell.setText(windowTitle());
         shell.setSize(1280, 820);
+        if (initialWindowX >= 0 || initialWindowY >= 0) {
+            // Tab tear-off: put the new window where the tab was dropped.
+            org.eclipse.swt.graphics.Rectangle bounds = shell.getMonitor().getBounds();
+            int w = 1280, h = 820;
+            int x = initialWindowX >= 0
+                    ? Math.max(bounds.x, Math.min(bounds.x + bounds.width - w, initialWindowX - w / 2))
+                    : bounds.x + (bounds.width - w) / 2;
+            int y = initialWindowY >= 0
+                    ? Math.max(bounds.y, Math.min(bounds.y + bounds.height - 60, initialWindowY - 24))
+                    : bounds.y + (bounds.height - h) / 2;
+            shell.setLocation(x, y);
+        }
         shell.setBackground(colChromeDeep);
 
         GridLayout root = new GridLayout(1, false);
@@ -341,9 +365,45 @@ public class BrowserUI {
         tabManager.setAppActive(true);
         tabManager.focusActiveBrowser();
         MacWindowCaptureProtection.install(shell);
+        // If the NSWindow id was not yet materialised when the layout builders
+        // ran (pre-open), the glass call above was a no-op; the shell is now
+        // fully opened, so apply once more. The native side is idempotent.
+        applyNativeGlass();
+        if (glassChrome() && windowGlassApplied) {
+            shell.setBackground(null);
+        }
+
+        // Visual smoke test hook: RIGEL_SNAPSHOT_PATH=/tmp/home.png captures
+        // the active page (with alpha) once the UI has settled and logs the
+        // glass state. Used by tests/ scripts; inert in normal launches.
+        String snapshotPath = System.getenv("RIGEL_SNAPSHOT_PATH");
+        if (snapshotPath != null && !snapshotPath.isBlank()) {
+            // Optional: simulate pressing the layout toggle mid-run so the
+            // smoke test reproduces the sidebar-button path, then capture.
+            boolean toggle = System.getenv("RIGEL_SMOKE_TOGGLE_SIDEBAR") != null;
+            if (toggle) display.timerExec(3400, () -> dumpLayoutDebug("before-toggle"));
+            if (toggle) display.timerExec(3500, this::toggleLayout);
+            display.timerExec(toggle ? 7000 : 5000, () -> {
+                if (tabManager != null) tabManager.snapshotActive(snapshotPath);
+                // Whole-window capture beside the page snapshot: verifies the
+                // chrome glass geometry (drag strip, tab row, sidebar).
+                String windowPath = snapshotPath.endsWith(".png")
+                        ? snapshotPath.substring(0, snapshotPath.length() - 4) + ".window.png"
+                        : snapshotPath + ".window.png";
+                boolean windowed = MacVibrancy.windowSnapshot(shell, windowPath);
+                System.out.println("[Rigel] smoke: glass=" + windowGlassApplied
+                        + " snapshot=" + snapshotPath + " window=" + windowed);
+                if (toggle) dumpLayoutDebug("after-toggle");
+            });
+        }
     }
 
     private void openInitialTabs() {
+        if (initialTabUrl != null && !initialTabUrl.isBlank()) {
+            // Torn-off tab: open exactly the handed-over page.
+            tabManager.createTab("New Tab", initialTabUrl);
+            return;
+        }
         if (restoreSessionOnOpen && settings.isRestoreSessionEnabled()) {
             List<String> urls = settings.getSessionUrls();
             if (!urls.isEmpty()) {
@@ -435,7 +495,7 @@ public class BrowserUI {
         bookmarks = null;
         history = null;
         downloads.clear();
-        newWindowAction = () -> {};
+        newWindowAction = (url, x, y) -> {};
         quitAction = () -> {};
         windowClosedAction = () -> {};
         settingsChangedAction = () -> {};
@@ -501,13 +561,15 @@ public class BrowserUI {
         if (tabManager != null) tabManager.refreshActiveHomeTab();
         shell.setBackground(colChromeDeep);
         if (contentArea != null && !contentArea.isDisposed()) {
-            contentArea.setBackground(colChromeDeep);
             contentArea.redraw();
         }
         enforceFullscreenChromeState();
         shell.layout(true, true);
         shell.redraw();
         restoreFindBar(suspendedFind);
+        // Final glass re-apply after all view surgery: the rebuild above can
+        // reorder the native effect view over the chrome; this re-pins it.
+        applyNativeGlass();
         disposeColors(retiredColors);
         MacWindowCaptureProtection.protectSoon(shell);
     }
@@ -531,33 +593,50 @@ public class BrowserUI {
         gc.setAlpha(255);
     }
 
+    /**
+     * Whole-window liquid glass. One native NSVisualEffectView spans the
+     * content view; the titlebar becomes transparent and the layout extends
+     * beneath it. Chrome strips and the sidebar are left unpainted apart from
+     * a faint theme-tinted gradient, and rigel://home renders with a
+     * transparent WKWebView, so the frosted desktop material shows through
+     * the surrounding chrome rather than a couple of strips.
+     *
+     * The native call additionally carries a low-alpha overlay in the
+     * theme's deep colour so the glass reads as "the current theme" instead
+     * of a generic desktop blur.
+     */
     private void applyNativeGlass() {
-        boolean enabled = glassChrome();
+        boolean enabled = glassChrome() && MacVibrancy.isSupported();
         boolean darkAppearance = currentTheme != RigelTheme.SAND;
-        chromeGlassApplied = MacVibrancy.apply(
-                shell, chromeComposite, enabled, MacVibrancy.MATERIAL_TITLEBAR, 0.82,
-                darkAppearance);
-        navGlassApplied = MacVibrancy.apply(
-                shell, navBarComposite, enabled, MacVibrancy.MATERIAL_TITLEBAR, 0.82,
-                darkAppearance);
-        sidebarGlassApplied = MacVibrancy.apply(
-                shell, sidebarComposite, enabled, MacVibrancy.MATERIAL_SIDEBAR, 0.84,
-                darkAppearance);
-        MacVibrancy.prepareWindow(shell,
-                enabled && (chromeGlassApplied || navGlassApplied || sidebarGlassApplied));
+        double tintAlpha = darkAppearance ? 0.34 : 0.18;
+        windowGlassApplied = MacVibrancy.applyWindowGlass(shell, enabled,
+                MacVibrancy.MATERIAL_UNDER_WINDOW, tintAlpha,
+                currentTheme.chromeDeep, darkAppearance);
 
-        // If Cocoa supports vibrancy but applying the native view fails, force
-        // an opaque inherited surface so no control falls back to an OS-default
-        // light background in the middle of a dark theme.
-        if (enabled && chromeComposite != null && !chromeComposite.isDisposed() && !chromeGlassApplied)
-            chromeComposite.setBackground(colChromeDeep);
-        if (enabled && navBarComposite != null && !navBarComposite.isDisposed() && !navGlassApplied)
-            navBarComposite.setBackground(colNavBg);
-        if (enabled && sidebarComposite != null && !sidebarComposite.isDisposed() && !sidebarGlassApplied)
-            sidebarComposite.setBackground(colSidebarBg);
+        // If Cocoa supports vibrancy but installing the native view fails,
+        // force an opaque inherited surface so no control falls back to an
+        // OS-default light background in the middle of a dark theme.
+        if (enabled && !windowGlassApplied) {
+            if (chromeComposite != null && !chromeComposite.isDisposed())
+                chromeComposite.setBackground(colChromeDeep);
+            if (navBarComposite != null && !navBarComposite.isDisposed())
+                navBarComposite.setBackground(colNavBg);
+            if (sidebarComposite != null && !sidebarComposite.isDisposed())
+                sidebarComposite.setBackground(colSidebarBg);
+        }
+        restyleAddressField();
         if (chromeComposite != null && !chromeComposite.isDisposed()) chromeComposite.redraw();
         if (navBarComposite != null && !navBarComposite.isDisposed()) navBarComposite.redraw();
         if (sidebarComposite != null && !sidebarComposite.isDisposed()) sidebarComposite.redraw();
+        if (contentArea != null && !contentArea.isDisposed()) contentArea.redraw();
+    }
+
+    /** Translucent search field over the glass material; solid theme fill
+     *  is restored by the same call when glass is off. */
+    private void restyleAddressField() {
+        if (addressBar == null || addressBar.isDisposed()) return;
+        MacVibrancy.styleAddressField(addressBar, glassChrome() && windowGlassApplied,
+                currentTheme.addrBg, 0.42, currentTheme.addrFg);
     }
 
     // ── Font allocation ──────────────────────────────────────────────────────
@@ -580,7 +659,6 @@ public class BrowserUI {
     // ── Layout builders ──────────────────────────────────────────────────────
 
     private void buildTopBarLayout() {
-        chromeGlassApplied = false;
         disposeSidebarWidgets();
         disposeTopBarWidgets();
 
@@ -592,15 +670,19 @@ public class BrowserUI {
         // get here, so without this move chrome ends up BELOW the content area.
         if (contentArea != null && !contentArea.isDisposed())
             chromeComposite.moveAbove(contentArea);
-        // Gradient background across the full chrome strip
+        // Gradient background across the full chrome strip. With glass active
+        // this is only a light tint; the native material dominates.
         chromeComposite.addPaintListener(e -> {
             Point sz = chromeComposite.getSize();
-            paintChromeGradient(e.gc, sz, colNavBg, colChromeDeep, 218, chromeGlassApplied);
+            paintChromeGradient(e.gc, sz, colNavBg, colChromeDeep,
+                    GLASS_CHROME_TINT_ALPHA, windowGlassApplied);
         });
         GridLayout cl = new GridLayout(1, false);
         cl.marginWidth = cl.marginHeight = cl.verticalSpacing = 0;
         chromeComposite.setLayout(cl);
         chromeComposite.setLayoutData(new GridData(SWT.FILL, SWT.TOP, true, false));
+
+        buildGlassDragStrip(chromeComposite);
 
         // Tabs get their own quiet band. Keeping navigation on a separate row
         // gives the address field room to breathe and makes the hierarchy read
@@ -685,15 +767,11 @@ public class BrowserUI {
 
         buildHRule(chromeComposite);
         ensureContentArea(shell);
-        if (contentArea != null && !contentArea.isDisposed())
-            contentArea.setBackground(colChromeDeep);
         shell.layout(true, true);
         applyNativeGlass();
     }
 
     private void buildSidebarLayout() {
-        navGlassApplied = false;
-        sidebarGlassApplied = false;
         disposeTopBarWidgets();
         disposeSidebarWidgets();
 
@@ -701,17 +779,27 @@ public class BrowserUI {
         navBarComposite.setBackground(glassChrome() ? null : colNavBg);
         navBarComposite.addPaintListener(e -> {
             Point sz = navBarComposite.getSize();
-            paintChromeGradient(e.gc, sz, colNavBg, colChromeDeep, 218, navGlassApplied);
+            paintChromeGradient(e.gc, sz, colNavBg, colChromeDeep,
+                    GLASS_CHROME_TINT_ALPHA, windowGlassApplied);
         });
         GridLayout nl = new GridLayout(1, false);
         nl.marginWidth = nl.marginHeight = nl.verticalSpacing = 0;
         navBarComposite.setLayout(nl);
         navBarComposite.setLayoutData(new GridData(SWT.FILL, SWT.TOP, true, false));
+        buildGlassDragStrip(navBarComposite);
         buildNavRow(navBarComposite, true);
         buildHRule(navBarComposite);
 
-        sashForm = new SashForm(shell, SWT.HORIZONTAL);
-        sashForm.setBackground(colSidebarBg);
+        // NO_BACKGROUND: an opaque SashForm fill would sit between the window
+        // glass and the unpainted sidebar/content chain and quietly block the
+        // effect. The sash divider is re-filled explicitly when glass is off.
+        sashForm = new SashForm(shell, SWT.HORIZONTAL | SWT.NO_BACKGROUND | SWT.DOUBLE_BUFFERED);
+        sashForm.addPaintListener(e -> {
+            if (glassChrome() && windowGlassApplied) return;
+            Point sz = sashForm.getSize();
+            e.gc.setBackground(colSidebarBg);
+            e.gc.fillRectangle(0, 0, sz.x, sz.y);
+        });
         sashForm.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
         sashForm.addListener(SWT.Selection, e -> {
             rememberSidebarWeights();
@@ -725,10 +813,11 @@ public class BrowserUI {
         sidebarComposite = new Composite(sashForm, SWT.NO_BACKGROUND | SWT.DOUBLE_BUFFERED);
         sidebarComposite.setBackground(glassChrome() ? null : colSidebarBg);
         sidebarComposite.setBackgroundMode(SWT.INHERIT_FORCE);
-        // Subtle gradient down the sidebar
+        // Subtle gradient down the sidebar (a light tint once glass is active)
         sidebarComposite.addPaintListener(e -> {
             Point sz = sidebarComposite.getSize();
-            paintChromeGradient(e.gc, sz, colNavBg, colSidebarBg, 224, sidebarGlassApplied);
+            paintChromeGradient(e.gc, sz, colNavBg, colSidebarBg,
+                    GLASS_SIDEBAR_TINT_ALPHA, windowGlassApplied);
         });
         GridLayout sl = new GridLayout(1, false);
         sl.marginWidth = sl.marginHeight = sl.verticalSpacing = 0;
@@ -774,8 +863,6 @@ public class BrowserUI {
         tabScroll.setContent(tabStripRow);
 
         ensureContentArea(sashForm);
-        if (contentArea != null && !contentArea.isDisposed())
-            contentArea.setBackground(colChromeDeep);
         sashForm.setWeights(sidebarWeights);
         shell.layout(true, true);
         applyNativeGlass();
@@ -875,11 +962,47 @@ public class BrowserUI {
         sep.setLayoutData(gd);
     }
 
+    /**
+     * Full-width, non-interactive strip reserved where macOS draws the
+     * traffic-light buttons once glass turns the window into a
+     * full-size-content view (the window title is hidden, so the strip is
+     * visually just more glass). It doubles as the guaranteed window-drag
+     * surface — no tab, button, or field ever sits under the lights — and
+     * double-clicking it zooms the window, exactly like the real titlebar.
+     */
+    private void buildGlassDragStrip(Composite parent) {
+        if (!glassChrome() || !MacVibrancy.isSupported()) return;
+        Composite strip = new Composite(parent, SWT.NO_BACKGROUND | SWT.DOUBLE_BUFFERED);
+        strip.setData("rigel.purpose", "window-drag-strip");
+        GridData data = new GridData(SWT.FILL, SWT.TOP, true, false);
+        data.heightHint = GLASS_TITLE_STRIP_HEIGHT;
+        strip.setLayoutData(data);
+        setAccessibleName(strip, "Window drag area");
+        strip.addListener(SWT.MouseDown, e -> {
+            if (e.button == 1) MacVibrancy.dragWindow(shell);
+        });
+        strip.addListener(SWT.MouseDoubleClick, e -> {
+            if (e.button == 1) MacVibrancy.zoomWindow(shell);
+        });
+    }
+
     private void ensureContentArea(Composite parent) {
         if (contentArea == null || contentArea.isDisposed()) {
-            contentArea  = new Composite(parent, SWT.NONE);
+            // NO_BACKGROUND so the window glass shows wherever the page
+            // (or the transparent rigel://home webview) leaves slack.
+            contentArea  = new Composite(parent, SWT.NO_BACKGROUND | SWT.DOUBLE_BUFFERED);
             contentArea.setBackgroundMode(SWT.INHERIT_FORCE);
-            stackLayout  = new StackLayout();
+            contentArea.addPaintListener(e -> {
+                // While glass is active the frosted material is the
+                // background; otherwise fake the old solid canvas with a
+                // theme fill (NO_BACKGROUND composites paint nothing on
+                // their own).
+                if (glassChrome() && windowGlassApplied) return;
+                Point size = contentArea.getSize();
+                e.gc.setBackground(colChromeDeep);
+                e.gc.fillRectangle(0, 0, size.x, size.y);
+            });
+            stackLayout  = new TabDeckLayout();
             contentArea.setLayout(stackLayout);
             contentArea.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
         } else {
@@ -889,6 +1012,25 @@ public class BrowserUI {
     }
 
     // ── Layout toggle ────────────────────────────────────────────────────────
+
+    private void dumpLayoutDebug(String tag) {
+        StringBuilder out = new StringBuilder("[Rigel] layout-dump ").append(tag);
+        out.append(" shell=").append(shell == null || shell.isDisposed() ? "dead" : shell.getSize());
+        if (shell != null && !shell.isDisposed()) {
+            out.append(" shellChildren=").append(shell.getChildren().length);
+            for (Control child : shell.getChildren())
+                out.append(" [").append(child.getClass().getSimpleName())
+                   .append(" b=").append(child.getBounds())
+                   .append(child.isVisible() ? " vis" : " HIDDEN")
+                   .append("]");
+        }
+        if (sashForm != null && !sashForm.isDisposed()) {
+            for (Control child : sashForm.getChildren())
+                out.append(" sashchild=[").append(child.getClass().getSimpleName())
+                   .append(" b=").append(child.getBounds()).append("]");
+        }
+        System.out.println(out);
+    }
 
     void toggleLayout() {
         settings.setSidebar(!sidebarMode);
@@ -942,6 +1084,9 @@ public class BrowserUI {
 
         Runnable r = () -> {
             if (tabStripRow == null || tabStripRow.isDisposed()) return;
+            // Never rebuild the strip while a tab drag is live: the control
+            // under the pointer is being dragged and must stay alive.
+            if (tabDragActive || dragArmedTab != null) return;
             TabManager.TabData focusedTab = null;
             Control focused = tabStripRow.getDisplay().getFocusControl();
             if (focused != null && !focused.isDisposed()
@@ -968,6 +1113,9 @@ public class BrowserUI {
                 if (sidebarMode) renderSidebarTab(tabs.get(i), i == active);
                 else             renderTopBarTab(tabs.get(i), i == active, topTabWidth);
             }
+            Control[] stripChildren = tabStripRow.getChildren();
+            for (int i = 0; i < stripChildren.length; i++)
+                stripChildren[i].setData(DATA_TAB_INDEX, i);
 
             tabStripRow.layout(true, true);
             if (tabScroll != null && !tabScroll.isDisposed()) {
@@ -1062,6 +1210,179 @@ public class BrowserUI {
         Point location = anchor.toDisplay(0, anchor.getSize().y + 4);
         menu.setLocation(location);
         menu.setVisible(true);
+    }
+
+    // ── Tab drag: Chrome-style reorder + tear-off into a new window ─────
+
+    private static final int TAB_DRAG_THRESHOLD = 8;
+    private static final int TEAR_OFF_MARGIN = 24;
+
+    private TabManager.TabData dragArmedTab;
+    private Canvas dragArmedControl;
+    private org.eclipse.swt.graphics.Point dragStartDisplayPoint;
+    private boolean tabDragActive;
+    private int tabDragInsertion = -1;
+    private boolean dragClickConsumed;
+    private Listener tabDragFilter;
+
+    /** Call from a tab control's mouseDown; arms (but does not start) a drag. */
+    private void armTabDrag(Canvas control, TabManager.TabData tab) {
+        if (tabManager == null || tab == null || control == null || control.isDisposed()) return;
+        dragArmedTab = tab;
+        dragArmedControl = control;
+        dragClickConsumed = false;
+        dragStartDisplayPoint = control.getDisplay().getCursorLocation();
+        if (tabDragFilter == null) {
+            // Display-level filters keep tracking while the pointer is over
+            // other controls or outside the window entirely, which a control
+            // listener cannot do.
+            tabDragFilter = event -> {
+                if (event.type == SWT.MouseMove) updateTabDrag();
+                else if (event.type == SWT.MouseUp) finishTabDrag(event);
+            };
+        }
+        control.getDisplay().addFilter(SWT.MouseMove, tabDragFilter);
+        control.getDisplay().addFilter(SWT.MouseUp, tabDragFilter);
+    }
+
+    private void updateTabDrag() {
+        if (dragArmedTab == null || dragArmedControl == null || dragArmedControl.isDisposed()
+                || tabManager == null || !tabManager.getTabs().contains(dragArmedTab)) {
+            cancelTabDrag();
+            return;
+        }
+        org.eclipse.swt.graphics.Point here = dragArmedControl.getDisplay().getCursorLocation();
+        if (!tabDragActive) {
+            int dx = here.x - dragStartDisplayPoint.x;
+            int dy = here.y - dragStartDisplayPoint.y;
+            if (Math.abs(dx) < TAB_DRAG_THRESHOLD && Math.abs(dy) < TAB_DRAG_THRESHOLD) return;
+            tabDragActive = true;
+            // Raise the dragged tab, exactly like Chrome does.
+            tabManager.switchTo(dragArmedTab);
+        }
+        int insertion = computeTabInsertion(here);
+        if (insertion != tabDragInsertion) {
+            tabDragInsertion = insertion;
+            redrawTabStrip();
+        }
+    }
+
+    /** Insertion slot (in model order) for a display point, or -1. */
+    private int computeTabInsertion(org.eclipse.swt.graphics.Point here) {
+        if (tabStripRow == null || tabStripRow.isDisposed()) return -1;
+        Control[] children = tabStripRow.getChildren();
+        int index = 0;
+        for (Control child : children) {
+            if (child.isDisposed() || child.getData(DATA_TAB_MODEL) == null) continue;
+            org.eclipse.swt.graphics.Rectangle b = child.getBounds();
+            org.eclipse.swt.graphics.Point origin = child.toDisplay(0, 0);
+            boolean beforeSlot = sidebarMode
+                    ? here.y < origin.y + b.height / 2
+                    : here.x < origin.x + b.width / 2;
+            if (beforeSlot) return index;
+            index++;
+        }
+        return index == 0 ? -1 : index;
+    }
+
+    private boolean isOutsideTabStrip(org.eclipse.swt.graphics.Point here) {
+        if (tabStripRow == null || tabStripRow.isDisposed()) return true;
+        org.eclipse.swt.graphics.Rectangle b = tabStripRow.getBounds();
+        org.eclipse.swt.graphics.Point origin = tabStripRow.toDisplay(0, 0);
+        return here.x < origin.x - TEAR_OFF_MARGIN
+                || here.y < origin.y - TEAR_OFF_MARGIN
+                || here.x > origin.x + b.width + TEAR_OFF_MARGIN
+                || here.y > origin.y + b.height + TEAR_OFF_MARGIN;
+    }
+
+    private void finishTabDrag(Event event) {
+        TabManager.TabData dragged = dragArmedTab;
+        boolean wasActive = tabDragActive;
+        int insertion = tabDragInsertion;
+        org.eclipse.swt.graphics.Point here = shell == null || shell.isDisposed()
+                ? new org.eclipse.swt.graphics.Point(event.x, event.y)
+                : shell.getDisplay().getCursorLocation();
+        removeTabDragFilters();
+        dragArmedTab = null;
+        dragArmedControl = null;
+        tabDragActive = false;
+        tabDragInsertion = -1;
+        dragClickConsumed = wasActive;   // plain clicks fall through untouched
+        redrawTabStrip();
+        if (!wasActive || dragged == null || tabManager == null
+                || !tabManager.getTabs().contains(dragged)) return;
+        if (event.button != 1) return;
+        if (isOutsideTabStrip(here)) {
+            detachTabToNewWindow(dragged, here.x, here.y);
+        } else if (insertion >= 0) {
+            tabManager.moveTab(dragged, insertion);
+        }
+    }
+
+    private void cancelTabDrag() {
+        removeTabDragFilters();
+        dragArmedTab = null;
+        dragArmedControl = null;
+        boolean wasActive = tabDragActive;
+        tabDragActive = false;
+        tabDragInsertion = -1;
+        if (wasActive) redrawTabStrip();
+    }
+
+    private void removeTabDragFilters() {
+        if (shell == null || shell.isDisposed() || tabDragFilter == null) {
+            tabDragFilter = null;
+            return;
+        }
+        Display display = shell.getDisplay();
+        try {
+            display.removeFilter(SWT.MouseMove, tabDragFilter);
+            display.removeFilter(SWT.MouseUp, tabDragFilter);
+        } catch (Throwable ignored) {
+        }
+        tabDragFilter = null;
+    }
+
+    /** True when the just-finished press was consumed by a tab drag. */
+    private boolean dragClickWasConsumed() {
+        boolean consumed = dragClickConsumed;
+        dragClickConsumed = false;
+        return consumed;
+    }
+
+    private void redrawTabStrip() {
+        if (tabStripRow == null || tabStripRow.isDisposed()) return;
+        for (Control child : tabStripRow.getChildren()) {
+            if (!child.isDisposed()) child.redraw();
+        }
+    }
+
+    /** Chrome-style tear-off: the tab becomes the first tab of a new window. */
+    private void detachTabToNewWindow(TabManager.TabData tab, int displayX, int displayY) {
+        if (tab == null || tabManager == null) return;
+        String url = tabManager.detachTab(tab);
+        if (url != null) newWindowAction.openWindow(url, displayX, displayY);
+    }
+
+    /** Paints the insertion indicator on tab canvases while a drag is live. */
+    private void drawInsertionMarker(GC gc, org.eclipse.swt.graphics.Point size, Control control) {
+        if (!tabDragActive || tabDragInsertion < 0 || tabManager == null) return;
+        Object indexData = control.getData(DATA_TAB_INDEX);
+        if (!(indexData instanceof Integer index)) return;
+        int count = tabManager.getTabs().size();
+        boolean before = index.intValue() == tabDragInsertion;
+        boolean after = tabDragInsertion == count && index.intValue() == count - 1;
+        if (!before && !after) return;
+        gc.setForeground(colTabAccent);
+        gc.setLineWidth(2);
+        if (sidebarMode) {
+            int y = before ? 1 : size.y - 1;
+            gc.drawLine(2, y, size.x - 2, y);
+        } else {
+            int x = before ? 1 : size.x - 1;
+            gc.drawLine(x, 2, x, size.y - 2);
+        }
+        gc.setLineWidth(1);
     }
 
     private void installTabContextMenu(TabManager.TabData tab, Control... controls) {
@@ -1228,6 +1549,7 @@ public class BrowserUI {
                 gc.setForeground(closeHot[0] ? colTextPrimary : colTextMuted);
                 drawCloseGlyph(gc, size.x - 18, size.y / 2);
             }
+            drawInsertionMarker(gc, size, control);
         });
         control.addMouseTrackListener(new MouseTrackAdapter() {
             @Override public void mouseEnter(MouseEvent e) {
@@ -1250,10 +1572,14 @@ public class BrowserUI {
         });
         control.addMouseListener(new MouseAdapter() {
             @Override public void mouseDown(MouseEvent e) {
-                if (e.button == 1) control.setFocus();
+                if (e.button == 1) {
+                    control.setFocus();
+                    armTabDrag(control, tab);
+                }
             }
 
             @Override public void mouseUp(MouseEvent e) {
+                if (dragClickWasConsumed()) return;
                 if (e.button == 2) {
                     tabManager.closeTab(tab);
                 } else if (e.button == 1) {
@@ -1316,6 +1642,7 @@ public class BrowserUI {
                 gc.setForeground(closeHot[0] ? colTextPrimary : colTextMuted);
                 drawCloseGlyph(gc, size.x - 19, size.y / 2);
             }
+            drawInsertionMarker(gc, size, control);
         });
         control.addMouseTrackListener(new MouseTrackAdapter() {
             @Override public void mouseEnter(MouseEvent e) {
@@ -1338,10 +1665,14 @@ public class BrowserUI {
         });
         control.addMouseListener(new MouseAdapter() {
             @Override public void mouseDown(MouseEvent e) {
-                if (e.button == 1) control.setFocus();
+                if (e.button == 1) {
+                    control.setFocus();
+                    armTabDrag(control, tab);
+                }
             }
 
             @Override public void mouseUp(MouseEvent e) {
+                if (dragClickWasConsumed()) return;
                 if (e.button == 2) {
                     tabManager.closeTab(tab);
                 } else if (e.button == 1) {
@@ -1569,7 +1900,7 @@ public class BrowserUI {
         fileHeader.setText("File");
         Menu file = new Menu(shell, SWT.DROP_DOWN);
         fileHeader.setMenu(file);
-        addMenuItem(file, "New Window", SWT.MOD1 | 'N', newWindowAction);
+        addMenuItem(file, "New Window", SWT.MOD1 | 'N', () -> newWindowAction.openWindow(null, -1, -1));
         addMenuItem(file, "New Tab", SWT.MOD1 | 'T', () -> tabManager.createTab("New Tab", "rigel://home"));
         addMenuItem(file, "Open File...", SWT.MOD1 | 'O', this::openFile);
         addMenuItem(file, "Save Page As...", SWT.MOD1 | 'S', this::savePageAs);
@@ -3005,7 +3336,7 @@ public class BrowserUI {
         boolean handled = true;
 
         if (key(e, 'n') && !shift) {
-            newWindowAction.run();
+            newWindowAction.openWindow(null, -1, -1);
         } else if (key(e, 't')) {
             if (shift) tabManager.reopenClosedTab();
             else       tabManager.createTab("New Tab", "rigel://home");
@@ -3424,7 +3755,7 @@ public class BrowserUI {
         }
 
         Button glassChk = new Button(themePage, SWT.CHECK);
-        glassChk.setText("Use native translucent chrome");
+        glassChk.setText("Liquid glass window — transparent chrome, sidebar & home page");
         glassChk.setSelection(settings.isGlassChromeEnabled());
         glassChk.setBackground(colNavBg);
         glassChk.setForeground(colTextPrimary);
@@ -4127,8 +4458,56 @@ public class BrowserUI {
 
     public Shell        getShell()        { return shell; }
     public Composite    getContentArea()  { return contentArea; }
-    public StackLayout  getStackLayout()  { return stackLayout; }
+    public TabDeckLayout getStackLayout() { return stackLayout; }
     public RigelTheme   getCurrentTheme() { return currentTheme; }
+
+
+
+    /**
+     * Chrome-style new-window opener. RigelBrowser hands over an optional
+     * initial URL plus the screen point where the new window should appear
+     * (tab tear-off), or null/-1,-1 for a plain new window.
+     */
+    @FunctionalInterface
+    public interface NewWindowOpener {
+        void openWindow(String initialUrl, int x, int y);
+    }
+
+    /**
+     * Deck layout for tab containers. Unlike SWT's StackLayout — which
+     * zero-sizes every background tab — this keeps ALL tab containers sized
+     * to the full content area and relies on z-ordering (moveAbove on
+     * switchTo) to show the active one. Zero-sized background WKWebViews
+     * are "not visible" to WebKit, which suspends their pages and terminates
+     * their content processes — that is why playback stopped whenever tabs
+     * were switched. Full-size mounted views stay alive and keep playing
+     * (Safari/Chrome behaviour); the cost is bounded by TabManager's
+     * Chrome-style background throttling, not by tearing pages down.
+     */
+    static final class TabDeckLayout extends org.eclipse.swt.widgets.Layout {
+        /** Compatibility field: the layout no longer needs it, but callers
+         *  (TabManager.reattach/switchTo) still track the intended top view. */
+        public Control topControl;
+
+        @Override
+        protected org.eclipse.swt.graphics.Point computeSize(
+                Composite composite, int wHint, int hHint, boolean flushCache) {
+            return new org.eclipse.swt.graphics.Point(
+                    wHint == SWT.DEFAULT ? 0 : wHint,
+                    hHint == SWT.DEFAULT ? 0 : hHint);
+        }
+
+        @Override
+        protected void layout(Composite composite, boolean flushCache) {
+            org.eclipse.swt.graphics.Rectangle area = composite.getClientArea();
+            int w = Math.max(0, area.width);
+            int h = Math.max(0, area.height);
+            for (Control child : composite.getChildren()) {
+                org.eclipse.swt.graphics.Rectangle b = child.getBounds();
+                if (b.width != w || b.height != h) child.setBounds(0, 0, w, h);
+            }
+        }
+    }
     public boolean      areHomeShortcutsEnabled() {
         return settings == null || settings.isHomeShortcutsEnabled();
     }

@@ -655,10 +655,10 @@ public final class LoopbackSocks5Server implements AutoCloseable {
         }
 
         InetSocketAddress resolve() throws IOException {
-            InetAddress address = rawAddress == null
-                    ? InetAddress.getByName(host)
-                    : InetAddress.getByAddress(rawAddress);
-            return new InetSocketAddress(address, port);
+            if (rawAddress != null) {
+                return new InetSocketAddress(InetAddress.getByAddress(rawAddress), port);
+            }
+            return SecureDns.resolve(host, port);
         }
 
         String authority() {
@@ -719,7 +719,9 @@ public final class LoopbackSocks5Server implements AutoCloseable {
         static UpstreamUdpAssociation open(ProxyServer.Upstream upstream) throws IOException {
             Socket control = new Socket();
             try {
-                control.connect(new InetSocketAddress(upstream.host(), upstream.port()),
+                // Resolve through SecureDns so the upstream hostname is not
+                // leaked to the local network resolver when DoH is active.
+                control.connect(SecureDns.resolve(upstream.host(), upstream.port()),
                         CONNECT_TIMEOUT_MS);
                 control.setKeepAlive(true);
                 control.setTcpNoDelay(true);

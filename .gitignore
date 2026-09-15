@@ -6,6 +6,7 @@
 /build/
 /classes/
 /target/
+/version.txt
 /.codex-proxy-routing-test/
 /dock_identity.dylib
 *.class

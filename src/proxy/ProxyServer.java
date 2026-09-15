@@ -34,6 +34,9 @@ public class ProxyServer {
 
     public enum UpstreamType {
         HTTP,
+        /** HTTP CONNECT over TLS: the hop to the upstream is encrypted, so the
+         *  local network only sees a TLS connection to the upstream host. */
+        HTTPS,
         SOCKS4,
         SOCKS5;
 
@@ -123,6 +126,7 @@ public class ProxyServer {
                     .withIdleConnectionTimeout(java.time.Duration.ofMinutes(5))
                     .withConnectTimeout(15_000)
                     .withMaxChunkSize(64 * 1024)
+                    .withServerResolver(SecureDns.asHostResolver())
                     .withChainProxyManager(new SwitchableProxy(this))
                     .withFiltersSource(new HttpFiltersSourceAdapter() {
                         @Override
@@ -236,8 +240,11 @@ public class ProxyServer {
             candidate = candidate.substring(1, candidate.length() - 1);
         }
         try {
-            for (InetAddress address : InetAddress.getAllByName(candidate)) {
-                if (address.isLoopbackAddress() || address.isAnyLocalAddress()) return true;
+            InetSocketAddress resolved = SecureDns.resolve(candidate, 0);
+            InetAddress address = resolved.getAddress();
+            if (address != null
+                    && (address.isLoopbackAddress() || address.isAnyLocalAddress())) {
+                return true;
             }
         } catch (Exception ignored) {
             // An unresolved upstream will fail normally when a request uses it.

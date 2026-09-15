@@ -738,6 +738,28 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
     [_pendingPopups removeObject:popup];
 }
 
+/*
+ * Popup teardown must never run while a WebKit delegate callback for that
+ * popup is still on the stack. Removing the popup from the maps drops its
+ * last strong reference, so the WKWebView (and its window) dealloc inside
+ * webViewDidClose:/windowWillClose: — WebKit then touches freed memory when
+ * the callback unwinds. This crash matches hs_err reports after rapid
+ * popup/tab opening and closing. Defer the teardown one runloop tick so the
+ * objects survive until after the callback returns.
+ */
+- (void)closePendingPopupDeferred:(WKWebView *)popup {
+    if (popup == nil || ![self isPendingPopup:popup]) return;
+    __weak RigelWKController *weakSelf = self;
+    __weak WKWebView *weakPopup = popup;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        RigelWKController *strongSelf = weakSelf;
+        WKWebView *strongPopup = weakPopup;
+        if (strongSelf != nil && strongPopup != nil
+                && [strongSelf isPendingPopup:strongPopup])
+            [strongSelf closePendingPopup:strongPopup];
+    });
+}
+
 - (void)closeAllPendingPopups {
     NSArray<WKWebView *> *popups = _pendingPopups.allObjects ?: @[];
     for (WKWebView *popup in popups) [self closePendingPopup:popup];
@@ -749,6 +771,12 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
     // affected WebKit versions can retain the earlier authorization flag and
     // RELEASE_ASSERT when the preference and decision disagree. AppSSO is
     // rejected solely through the navigation-delegate policy below.
+    //
+    // WebKit requires the popup WKWebView to be created synchronously, but
+    // creating and ordering-front an NSWindow inside this delegate (which
+    // runs inside decidePolicyForNavigationAction's stack) re-enters AppKit
+    // from WebKit's policy decision and can hard-crash the process. Only the
+    // view is created here; the window is attached on the next runloop tick.
     NSRect frame = NSMakeRect(0, 0, 1050, 720);
     WKWebView *popup = [[RigelWKNativeView alloc] initWithFrame:frame
                                                   configuration:configuration];
@@ -758,28 +786,40 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
     popup.allowsBackForwardNavigationGestures = YES;
     if (@available(macOS 13.3, *)) popup.inspectable = YES;
 
-    NSWindow *window = [[NSWindow alloc]
-        initWithContentRect:frame
-                  styleMask:(NSWindowStyleMaskTitled |
-                             NSWindowStyleMaskClosable |
-                             NSWindowStyleMaskMiniaturizable |
-                             NSWindowStyleMaskResizable)
-                    backing:NSBackingStoreBuffered
-                      defer:NO];
-    window.title = @"Rigel";
-    window.delegate = self;
-    window.releasedWhenClosed = NO;
-    window.sharingType = DiagnosticCaptureEnabled()
-        ? NSWindowSharingReadOnly
-        : NSWindowSharingNone;
-    window.contentView = popup;
-    [window center];
-    [window makeKeyAndOrderFront:nil];
-
     if (_pendingPopups == nil) _pendingPopups = [NSMutableSet set];
-    if (_popupWindows == nil) _popupWindows = [NSMapTable strongToStrongObjectsMapTable];
     [_pendingPopups addObject:popup];
-    [_popupWindows setObject:window forKey:popup];
+
+    __weak RigelWKController *weakSelf = self;
+    __weak WKWebView *weakPopup = popup;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        RigelWKController *strongSelf = weakSelf;
+        WKWebView *strongPopup = weakPopup;
+        if (strongSelf == nil || strongPopup == nil) return;
+        if (![strongSelf isPendingPopup:strongPopup]) return;  // already closed
+        if ([strongSelf popupWindowForWebView:strongPopup] != nil) return;
+
+        NSWindow *window = [[NSWindow alloc]
+            initWithContentRect:frame
+                      styleMask:(NSWindowStyleMaskTitled |
+                                 NSWindowStyleMaskClosable |
+                                 NSWindowStyleMaskMiniaturizable |
+                                 NSWindowStyleMaskResizable)
+                        backing:NSBackingStoreBuffered
+                          defer:NO];
+        window.title = @"Rigel";
+        window.delegate = strongSelf;
+        window.releasedWhenClosed = NO;
+        window.sharingType = DiagnosticCaptureEnabled()
+            ? NSWindowSharingReadOnly
+            : NSWindowSharingNone;
+        window.contentView = strongPopup;
+        [window center];
+        [window makeKeyAndOrderFront:nil];
+
+        if (strongSelf->_popupWindows == nil)
+            strongSelf->_popupWindows = [NSMapTable strongToStrongObjectsMapTable];
+        [strongSelf->_popupWindows setObject:window forKey:strongPopup];
+    });
     if (getenv("RIGEL_LOGIN_DIAGNOSTICS") != NULL)
         NSLog(@"[Rigel login diagnostics] popup created");
     return popup;
@@ -808,11 +848,7 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
         }
     }
     if (closingPopup == nil) return;
-    closingPopup.navigationDelegate = nil;
-    closingPopup.UIDelegate = nil;
-    [closingPopup stopLoading];
-    [_pendingPopups removeObject:closingPopup];
-    [_popupWindows removeObjectForKey:closingPopup];
+    [self closePendingPopupDeferred:closingPopup];
 }
 
 - (void)downloadURL:(NSURL *)url {
@@ -974,13 +1010,17 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
         });
         return;
     }
-    [self emit:RIGEL_WK_EVENT_PROCESS_RESTARTED
-          first:webView.URL.absoluteString ?: @"" second:@""];
     // WebKit may terminate hidden content processes specifically to recover
     // memory. Reloading every hidden tab immediately defeats that recovery and
     // can create a reload/termination storm when many tabs are open. Java
     // remembers the event and reloads the tab when it becomes visible again.
-    if (webView.window == nil || webView.isHiddenOrHasHiddenAncestor) return;
+    // (Visible tabs reload right here, so PROCESS_RESTARTED is only emitted
+    // for the deferred path — otherwise Java would reload twice.)
+    if (webView.window == nil || webView.isHiddenOrHasHiddenAncestor) {
+        [self emit:RIGEL_WK_EVENT_PROCESS_RESTARTED
+              first:webView.URL.absoluteString ?: @"" second:@""];
+        return;
+    }
     if (!retryAllowed) {
         [self emit:RIGEL_WK_EVENT_LOAD_FAILED
               first:webView.URL.absoluteString ?: @""
@@ -1263,7 +1303,7 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
 
 - (void)webViewDidClose:(WKWebView *)webView {
     if ([self isPendingPopup:webView]) {
-        [self closePendingPopup:webView];
+        [self closePendingPopupDeferred:webView];
         return;
     }
     __weak RigelWKController *weakSelf = self;
@@ -1781,16 +1821,26 @@ void rigel_wk_destroy(void *handle) {
     }
     [controller.downloads removeAllObjects];
     [controller closeAllPendingPopups];
-    WKUserContentController *scripts = controller.webView.configuration.userContentController;
+    WKWebView *view = controller.webView;
+    WKUserContentController *scripts = view == nil ? nil : view.configuration.userContentController;
     for (NSString *name in HandlerNames()) [scripts removeScriptMessageHandlerForName:name];
-    controller.webView.navigationDelegate = nil;
-    controller.webView.UIDelegate = nil;
-    [controller.webView stopLoading];
-    [controller.webView removeFromSuperview];
+    view.navigationDelegate = nil;
+    view.UIDelegate = nil;
+    [view stopLoading];
     controller.webView = nil;
     controller.eventCallback = NULL;
     controller.scriptCallback = NULL;
     controller.policyCallback = NULL;
+    // Detach now, but keep the controller and view alive for one more runloop
+    // tick. rigel_wk_destroy can be reached from a JNA callback that WebKit
+    // invoked (Java event -> closeTab -> dispose -> here); releasing objects
+    // synchronously would dealloc the WKWebView while its own delegate or
+    // script-message callback is still on the stack, crashing when the
+    // callback unwinds. The dispatch block holds the last strong reference
+    // and frees everything after the stack has drained.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [view removeFromSuperview];
+    });
     CFBridgingRelease(handle);
 }
 
@@ -1847,6 +1897,60 @@ __attribute__((visibility("default")))
 void rigel_wk_set_frame(void *handle, double x, double y, double width, double height) {
     WKWebView *view = Controller(handle).webView;
     view.frame = NSMakeRect(x, y, MAX(1.0, width), MAX(1.0, height));
+}
+
+/* WebKit page zoom: public on newer macOS releases, private SPI earlier. */
+@interface WKWebView (RigelPageZoomSPI)
+- (void)setPageZoom:(double)zoom;
+- (void)_setPageZoom:(double)zoom;
+@end
+
+/*
+ * Makes the page background transparent so the window's vibrancy/liquid-
+ * glass material shows through (used for rigel://home). Real websites keep
+ * the opaque background so their own body backgrounds render normally.
+ * "drawsBackground" is a KVC-settable property on WKWebView; guard with
+ * @try/@catch for WebKit builds that do not expose it.
+ */
+__attribute__((visibility("default")))
+void rigel_wk_set_transparent(void *handle, int transparent) {
+    RigelWKController *controller = Controller(handle);
+    WKWebView *view = controller == nil ? nil : controller.webView;
+    if (view == nil) return;
+    BOOL drawsBackground = transparent == 0;
+    @try {
+        [view setValue:@(drawsBackground) forKey:@"drawsBackground"];
+    } @catch (NSException *ignored) {
+    }
+    if (@available(macOS 12.0, *)) {
+        view.underPageBackgroundColor = transparent
+            ? NSColor.clearColor
+            : NSColor.controlBackgroundColor;
+    }
+}
+
+/*
+ * Chrome/Safari-style page zoom. Uses WebKit's real page zoom when the
+ * running WebKit exposes it (public setPageZoom: or the _setPageZoom: SPI);
+ * it applies to layout like a browser zoom, keeps fixed-position UI and
+ * popover/anchor math consistent, and persists across navigations without
+ * re-injection. Returns 1 when the native path was used, 0 when the caller
+ * must fall back to the legacy CSS-zoom hack.
+ */
+__attribute__((visibility("default")))
+int rigel_wk_set_page_zoom(void *handle, double zoom) {
+    RigelWKController *controller = Controller(handle);
+    WKWebView *view = controller == nil ? nil : controller.webView;
+    if (view == nil || zoom < 0.2 || zoom > 5.0) return 0;
+    if ([view respondsToSelector:@selector(setPageZoom:)]) {
+        [view setPageZoom:zoom];
+        return 1;
+    }
+    if ([view respondsToSelector:@selector(_setPageZoom:)]) {
+        [view _setPageZoom:zoom];
+        return 1;
+    }
+    return 0;
 }
 
 __attribute__((visibility("default")))
@@ -1932,4 +2036,254 @@ void rigel_wk_evaluate(void *handle, const char *javascript, uint64_t evalToken,
             }
             callback(evalToken, Utf8(value), Utf8(error.localizedDescription));
         }];
+}
+
+/* ------------------------------------------------------------------------- */
+/* Window-level liquid glass                                                  */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Rigel's older design attached one NSVisualEffectView per chrome strip via
+ * raw objc_msgSend from Java, which left most of the window opaque. The
+ * functions below own the whole effect from this bridge instead:
+ *
+ *   - one NSVisualEffectView spans the full contentView (below every SWT
+ *     view), so the desktop blurs through whatever does not paint;
+ *   - the titlebar is made transparent and the content area extended under
+ *     it (full-size content view) with the textual title hidden, matching
+ *     Safari/Arc/Zen chrome;
+ *   - a theme-coloured tint layer on top of the material keeps each Rigel
+ *     theme recognisable over the frosted desktop.
+ *
+ * Traffic-light buttons keep working because the Java side leaves a fixed
+ * 28px drag strip at the top of its layout; that strips owns no NSControl,
+ * so Cocoa treats mouse-downs there as titlebar-area drags.
+ */
+
+/* NSView.tag is read-only on current SDKs; identifier marks our views. */
+static NSString *const RIGEL_GLASS_VIEW_ID = @"rigel.glass.effect";
+static NSString *const RIGEL_GLASS_TINT_ID = @"rigel.glass.tint";
+
+static NSVisualEffectView *RigelGlassView(NSWindow *window) {
+    if (window == nil || window.contentView == nil) return nil;
+    for (NSView *subview in window.contentView.subviews) {
+        if ([subview isKindOfClass:[NSVisualEffectView class]]
+                && [RIGEL_GLASS_VIEW_ID isEqualToString:subview.identifier]) {
+            return (NSVisualEffectView *)subview;
+        }
+    }
+    return nil;
+}
+
+static double RigelClampUnit(double value) {
+    return fmax(0.0, fmin(1.0, value));
+}
+
+__attribute__((visibility("default")))
+int rigel_window_set_glass(void *windowPtr, int enabled, int material,
+                           double tintAlpha, double r, double g, double b,
+                           int dark) {
+    if (windowPtr == NULL) return 0;
+    NSWindow *window = (__bridge NSWindow *)windowPtr;
+    if (window.contentView == nil) return 0;
+    NSVisualEffectView *effect = RigelGlassView(window);
+
+    if (!enabled) {
+        if (effect != nil) [effect removeFromSuperview];
+        if ((window.styleMask & NSWindowStyleMaskFullSizeContentView) != 0) {
+            window.styleMask &= ~(NSUInteger)NSWindowStyleMaskFullSizeContentView;
+        }
+        window.titlebarAppearsTransparent = NO;
+        window.titleVisibility = NSWindowTitleVisible;
+        window.opaque = YES;
+        window.backgroundColor = NSColor.windowBackgroundColor;
+        [window.contentView setNeedsDisplay:YES];
+        return 1;
+    }
+
+    window.titlebarAppearsTransparent = YES;
+    window.styleMask |= NSWindowStyleMaskFullSizeContentView;
+    window.titleVisibility = NSWindowTitleHidden;
+    window.opaque = NO;
+    window.backgroundColor = NSColor.clearColor;
+
+    if (effect == nil) {
+        effect = [[NSVisualEffectView alloc] initWithFrame:window.contentView.bounds];
+        effect.identifier = RIGEL_GLASS_VIEW_ID;
+        effect.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+        effect.blendingMode = NSVisualEffectBlendingModeBehindWindow;
+        effect.state = NSVisualEffectStateFollowsWindowActiveState;
+    }
+    // Always re-pin to the bottom. The chrome rebuild during a layout/theme
+    // switch disposes and re-parents SWT subviews; that surgery can leave
+    // this view frontmost, blanketing the whole window.
+    [window.contentView addSubview:effect positioned:NSWindowBelow relativeTo:nil];
+    effect.material = (NSVisualEffectMaterial)material;
+    effect.appearance = [NSAppearance appearanceNamed:
+        dark ? NSAppearanceNameVibrantDark : NSAppearanceNameVibrantLight];
+
+    NSView *tint = nil;
+    for (NSView *subview in effect.subviews) {
+        if ([RIGEL_GLASS_TINT_ID isEqualToString:subview.identifier]) { tint = subview; break; }
+    }
+    if (tint == nil) {
+        tint = [[NSView alloc] initWithFrame:effect.bounds];
+        tint.identifier = RIGEL_GLASS_TINT_ID;
+        tint.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+        tint.wantsLayer = YES;
+        [effect addSubview:tint];
+    }
+        NSColor *tintColor = [NSColor colorWithCalibratedRed:RigelClampUnit(r)
+                                                   green:RigelClampUnit(g)
+                                                    blue:RigelClampUnit(b)
+                                                   alpha:RigelClampUnit(tintAlpha)];
+    tint.layer.backgroundColor = tintColor.CGColor;
+
+    [window.contentView setNeedsDisplay:YES];
+    return 1;
+}
+
+/*
+ * Pixel-level test hook: captures the live WKWebView (including alpha) to a
+ * PNG. Rigel uses this in its visual smoke test to prove that rigel://home
+ * really is transparent (regions with alpha < 255 reveal the window glass),
+ * instead of trusting screenshots that need Screen Recording permission.
+ */
+__attribute__((visibility("default")))
+int rigel_wk_snapshot(void *handle, const char *path) {
+    RigelWKController *controller = Controller(handle);
+    WKWebView *view = controller == nil ? nil : controller.webView;
+    if (view == nil || path == NULL) return 0;
+    NSString *destination = [NSString stringWithUTF8String:path];
+    WKSnapshotConfiguration *config = [[WKSnapshotConfiguration alloc] init];
+    [view takeSnapshotWithConfiguration:config
+                      completionHandler:^(NSImage *image, NSError *error) {
+        if (image == nil || error != nil) return;
+        NSRect rect = NSMakeRect(0, 0, image.size.width, image.size.height);
+        CGImageRef cg = [image CGImageForProposedRect:&rect context:nil hints:nil];
+        if (cg == NULL) return;
+        NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithCGImage:cg];
+        NSData *png = [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+        if (png != nil) [png writeToFile:destination atomically:YES];
+    }];
+    return 1;
+}
+
+/*
+ * Test hook companion to rigel_wk_snapshot: renders the whole window —
+ * theme frame, glass material, and every SWT subview — into a PNG from
+ * inside the process, so the visual smoke test can inspect the chrome
+ * without macOS Screen Recording permission.
+ */
+__attribute__((visibility("default")))
+int rigel_window_snapshot(void *windowPtr, const char *path) {
+    if (windowPtr == NULL || path == NULL) return 0;
+    NSWindow *window = (__bridge NSWindow *)windowPtr;
+    NSView *frameView = window.contentView == nil ? nil : window.contentView.superview;
+    if (frameView == nil) return 0;
+    if (getenv("RIGEL_GLASS_DEBUG") != NULL) {
+        NSMutableString *dump = [NSMutableString stringWithFormat:
+            @"[Rigel] window hierarchy: contentView=%p superview=%p frame=%@ subviews=%lu",
+            window.contentView, frameView,
+            NSStringFromRect(window.contentView.frame),
+            (unsigned long)window.contentView.subviews.count];
+        void (^walk)(NSView *, int) = nil;
+        __block void (^walkCopy)(NSView *, int) = nil;
+        walk = ^(NSView *view, int depth) {
+            [dump appendFormat:@"\n  %*s<%@ id=%@ frame=%@ hidden=%d alpha=%.2f>",
+                depth * 2, "", NSStringFromClass(view.class),
+                view.identifier ?: @"-", NSStringFromRect(view.frame),
+                view.isHidden, view.alphaValue];
+            for (NSView *sub in view.subviews) walkCopy(sub, depth + 1);
+        };
+        walkCopy = [walk copy];
+        for (NSView *sub in window.contentView.subviews) walkCopy(sub, 1);
+        NSLog(@"%@", dump);
+    }
+    NSBitmapImageRep *rep =
+        [frameView bitmapImageRepForCachingDisplayInRect:frameView.bounds];
+    if (rep == nil) return 0;
+    rep.size = frameView.bounds.size;
+    [frameView cacheDisplayInRect:frameView.bounds toBitmapImageRep:rep];
+    NSData *png = [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+    if (png == nil) return 0;
+    return [png writeToFile:[NSString stringWithUTF8String:path] atomically:YES] ? 1 : 0;
+}
+
+/* Begins a native window move, e.g. when the user grabs Rigel's glass drag
+ * strip. Must be called from an SWT mouse-down handler so [NSApp
+ * currentEvent] is the matching NSEvent (macOS 10.11+). */
+__attribute__((visibility("default")))
+void rigel_window_drag(void *windowPtr) {
+    if (windowPtr == NULL) return;
+    NSWindow *window = (__bridge NSWindow *)windowPtr;
+    NSEvent *event = NSApp.currentEvent;
+    if (event == nil) return;
+    if ([window respondsToSelector:@selector(performWindowDragWithEvent:)])
+        [window performWindowDragWithEvent:event];
+}
+
+/* Standard titlebar double-click: zoom the window. */
+__attribute__((visibility("default")))
+void rigel_window_zoom(void *windowPtr) {
+    if (windowPtr == NULL) return;
+    NSWindow *window = (__bridge NSWindow *)windowPtr;
+    [window zoom:nil];
+}
+
+/*
+ * Styles the address/search field. Cocoa text fields only ever paint a solid
+ * background via the public property, so translucent colours are assigned
+ * directly here. JNA's NSWindow-level call keeps this beside the rest of
+ * the glass handling instead of threading through SWT's inline colour code.
+ * Non-glass mode disables the translucency by forcing the fill alpha to 1.
+ */
+/*
+ * The tab-strip ScrolledComposite hosts an NSScrollView whose internal
+ * NSClipView paints its own opaque control-grey background. No SWT
+ * background setting reaches it, so gaps between tabs stayed opaque grey
+ * over the glass. Glass mode switches the clip/scroll views to
+ * non-drawing; the opaque path restores the theme colour.
+ */
+__attribute__((visibility("default")))
+void rigel_scroll_set_glass(void *viewPtr, int enabled, double r, double g, double b) {
+    if (viewPtr == NULL) return;
+    NSView *view = (__bridge NSView *)viewPtr;
+    if (![view isKindOfClass:[NSScrollView class]]) return;
+    NSScrollView *scroll = (NSScrollView *)view;
+    NSClipView *clip = scroll.contentView;
+    if (enabled) {
+        scroll.drawsBackground = NO;
+        clip.drawsBackground = NO;
+        clip.backgroundColor = NSColor.clearColor;
+    } else {
+        clip.drawsBackground = YES;
+        clip.backgroundColor = [NSColor colorWithCalibratedRed:RigelClampUnit(r)
+                                                         green:RigelClampUnit(g)
+                                                          blue:RigelClampUnit(b)
+                                                         alpha:1.0];
+    }
+    [scroll setNeedsDisplay:YES];
+    [clip setNeedsDisplay:YES];
+}
+
+__attribute__((visibility("default")))
+void rigel_field_set_glass(void *viewPtr, int enabled,
+                           double r, double g, double b, double bgAlpha,
+                           double fr, double fg, double fb) {
+    if (viewPtr == NULL) return;
+    NSView *view = (__bridge NSView *)viewPtr;
+    if (![view isKindOfClass:[NSTextField class]]) return;
+    NSTextField *field = (NSTextField *)view;
+    double alpha = enabled ? bgAlpha : 1.0;
+    field.drawsBackground = YES;
+    field.backgroundColor = [NSColor colorWithCalibratedRed:RigelClampUnit(r)
+                                                      green:RigelClampUnit(g)
+                                                       blue:RigelClampUnit(b)
+                                                      alpha:RigelClampUnit(alpha)];
+    field.textColor = [NSColor colorWithCalibratedRed:RigelClampUnit(fr)
+                                                green:RigelClampUnit(fg)
+                                                 blue:RigelClampUnit(fb)
+                                                alpha:1.0];
+    [field setNeedsDisplay:YES];
 }

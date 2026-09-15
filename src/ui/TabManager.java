@@ -1,7 +1,6 @@
 package ui;
 
 import org.eclipse.swt.SWT;
-import org.eclipse.swt.custom.StackLayout;
 import org.eclipse.swt.dnd.Clipboard;
 import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.dnd.Transfer;
@@ -10,7 +9,9 @@ import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 
+import java.io.InputStream;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -62,7 +63,12 @@ public class TabManager {
 
     // ── Home page HTML ───────────────────────────────────────────────────────
 
-    /** Generates a theme-aware home page. Called each time rigel://home is loaded. */
+    /**
+     * Generates a theme-aware home page. Called each time rigel://home is
+     * loaded. The page keeps its designed opaque background; the window's
+     * liquid glass only replaces the surrounding chrome that used to be
+     * flat grey.
+     */
     private String buildHomeHtml() {
         BrowserUI.RigelTheme t = ui.getCurrentTheme();
         // Convert packed ints to CSS hex strings (no leading #)
@@ -1351,7 +1357,7 @@ public class TabManager {
     // ── Fields ───────────────────────────────────────────────────────────────
 
     private Composite     contentArea;
-    private StackLayout   stackLayout;
+    private BrowserUI.TabDeckLayout stackLayout;
     private final BrowserUI ui;
     private final List<TabData> tabs = new ArrayList<>();
     private final Deque<ClosedTab> closedTabs = new ArrayDeque<>();
@@ -1366,7 +1372,7 @@ public class TabManager {
     private long homeRenderVersion = 1;
     // ── Constructor ──────────────────────────────────────────────────────────
 
-    public TabManager(Composite contentArea, StackLayout stackLayout, BrowserUI ui) {
+    public TabManager(Composite contentArea, BrowserUI.TabDeckLayout stackLayout, BrowserUI ui) {
         this.contentArea = contentArea;
         this.stackLayout = stackLayout;
         this.ui          = ui;
@@ -1381,7 +1387,7 @@ public class TabManager {
      * re-points our stackLayout reference so subsequent switchTo() calls
      * work correctly.
      */
-    public void reattach(Composite newContentArea, StackLayout newStackLayout) {
+    public void reattach(Composite newContentArea, BrowserUI.TabDeckLayout newStackLayout) {
         this.contentArea = newContentArea;
         this.stackLayout = newStackLayout;
 
@@ -1389,9 +1395,10 @@ public class TabManager {
             tab.container.setParent(newContentArea);
         }
 
-        // Re-apply the active tab
+        // Re-apply the active tab on top of the z-ordered deck
         if (activeIndex >= 0 && activeIndex < tabs.size()) {
             stackLayout.topControl = tabs.get(activeIndex).container;
+            tabs.get(activeIndex).container.moveAbove(null);
         }
         newContentArea.layout(true, true);
     }
@@ -1403,12 +1410,15 @@ public class TabManager {
             ui.onTabLimitReached(MAX_LIVE_TABS);
             return;
         }
-        Composite container = new Composite(contentArea, SWT.NONE);
+        // NO_BACKGROUND all the way down: when the window glass material is
+        // active and a home tab makes its WKWebView transparent, nothing in
+        // the container chain may paint an opaque fill over the glass.
+        Composite container = new Composite(contentArea, SWT.NO_BACKGROUND);
         container.setBackgroundMode(SWT.INHERIT_FORCE);
         container.setLayout(new FillLayout());
 
-        RigelBrowser browser = new RigelBrowser(container, SWT.NONE);
-        installKeyboardFocusDocumentScript(browser);
+        RigelBrowser browser = new RigelBrowser(container, SWT.NO_BACKGROUND);
+        installDocumentScripts(browser);
 
         TabData tab = new TabData(container, browser, title, initialUrl);
         tabs.add(tab);
@@ -1463,12 +1473,12 @@ public class TabManager {
             ui.onTabLimitReached(MAX_LIVE_TABS);
             return null;
         }
-        Composite container = new Composite(contentArea, SWT.NONE);
+        Composite container = new Composite(contentArea, SWT.NO_BACKGROUND);
         container.setBackgroundMode(SWT.INHERIT_FORCE);
         container.setLayout(new FillLayout());
 
-        RigelBrowser browser = new RigelBrowser(container, SWT.NONE);
-        installKeyboardFocusDocumentScript(browser);
+        RigelBrowser browser = new RigelBrowser(container, SWT.NO_BACKGROUND);
+        installDocumentScripts(browser);
         TabData tab = new TabData(container, browser, title, url);
         tabs.add(tab);
         int idx = tabs.size() - 1;
@@ -1511,8 +1521,13 @@ public class TabManager {
 
     private void applyZoom(RigelBrowser b) {
         if (b == null || b.isDisposed()) return;
-        // At 100%, remove CSS zoom entirely so WebKit can keep video in its
-        // normal hardware-composited path. Non-default zoom remains available.
+        // Prefer WebKit's real page zoom (Safari-style). It applies to layout
+        // like a browser zoom — unlike the CSS-zoom hack, it keeps fixed-
+        // positioned UI, popover/anchor geometry, and getBoundingClientRect
+        // math consistent — and persists across navigations on its own.
+        if (b.setPageZoom(zoomPercent / 100.0)) return;
+        // Legacy WebKit fallback: CSS zoom. At 100%, remove it entirely so
+        // WebKit can keep video in its normal hardware-composited path.
         if (zoomPercent == 100) {
             safeExecute(b, "document.documentElement.style.removeProperty('zoom');");
         } else {
@@ -1665,6 +1680,50 @@ public class TabManager {
                 tab.url == null || tab.url.isBlank() ? "rigel://home" : tab.url);
     }
 
+    /**
+     * Chrome-style tab reorder: moves {@code tab} so that it occupies the
+     * slot at {@code targetIndex} in the strip (the insertion point computed
+     * against the pre-move order, exactly like dropping onto that slot).
+     * The active tab stays the same tab after the move.
+     */
+    public void moveTab(TabData tab, int targetIndex) {
+        if (tab == null || contentArea == null || contentArea.isDisposed()) return;
+        int from = tabs.indexOf(tab);
+        if (from < 0 || tabs.size() < 2 || targetIndex < 0 || targetIndex > tabs.size()) return;
+        int to = targetIndex > from ? targetIndex - 1 : targetIndex;
+        if (to == from || to < 0 || to > tabs.size() - 1) return;
+        TabData active = activeTab();
+        tabs.remove(from);
+        tabs.add(to, tab);
+        if (active != null) activeIndex = tabs.indexOf(active);
+        ui.onTabsChanged();
+    }
+
+    /**
+     * Removes a tab without recording it as "closed", for tear-off into a
+     * new window (Chrome-style tab dragging). Disposes this window's copy;
+     * the new window restores the URL. Returns the URL to hand over, or null
+     * if the tab could not be detached.
+     */
+    public String detachTab(TabData tab) {
+        if (tab == null || !tabs.contains(tab)) return null;
+        String url = tab.url == null || tab.url.isBlank() ? "rigel://home" : tab.url;
+        String title = tab.title;
+        int idx = tabs.indexOf(tab);
+        if (tabs.size() == 1) {
+            // Only tab in the window: opening the new window closes this one.
+            ui.getShell().close();
+            return url;
+        }
+        tabs.remove(idx);
+        ui.onBrowserClosing(tab.browser);
+        tab.container.dispose();
+        if (activeIndex >= tabs.size()) activeIndex = tabs.size() - 1;
+        else if (activeIndex > idx) activeIndex--;
+        switchTo(activeIndex);
+        return url;
+    }
+
     public void closeOtherTabs(TabData keep) {
         if (keep == null || !tabs.contains(keep) || tabs.size() < 2) return;
         for (int i = tabs.size() - 1; i >= 0; i--) {
@@ -1682,6 +1741,8 @@ public class TabManager {
     public void switchTo(int idx) {
         if (idx < 0 || idx >= tabs.size()) return;
         TabData tab = tabs.get(idx);
+        TabData previous = activeIndex >= 0 && activeIndex < tabs.size()
+                && tabs.get(activeIndex) != tab ? tabs.get(activeIndex) : null;
         ui.onTabWillActivate(tab.browser);
         activeIndex = idx;
         if ("rigel://home".equals(tab.url)
@@ -1690,14 +1751,30 @@ public class TabManager {
             beginLoading(tab);
             renderHome(tab);
         }
+        // Background tabs stay alive at full size behind the active one, so
+        // WebKit never suspends or reclaims them and their media keeps
+        // playing (Safari/Chrome behaviour). Throttle their animation timers
+        // so they don't burn battery while hidden behind the active tab.
+        if (previous != null && previous.browser != null && !previous.browser.isDisposed()) {
+            setBackgroundThrottle(previous.browser, true);
+        }
         stackLayout.topControl = tab.container;
+        tab.container.moveAbove(null);
         contentArea.layout();
+        if (tab.browser != null && !tab.browser.isDisposed()) {
+            setBackgroundThrottle(tab.browser, false);
+        }
         tab.browser.resumeAfterContentProcessTermination();
         ui.onActiveTabChanged();
         ui.onTabsChanged();
         ui.onActiveTabLoadState(tab.loading, tab.progress);
         syncChrome(tab);
         focusBrowserSoon(tab);
+    }
+
+    private void setBackgroundThrottle(RigelBrowser browser, boolean throttled) {
+        safeExecute(browser, "if(window.__rigelSetBackgroundTab)window.__rigelSetBackgroundTab("
+                + (throttled ? "true" : "false") + ");");
     }
 
     public void switchTo(TabData tab) {
@@ -1816,6 +1893,12 @@ public class TabManager {
         if (tab == null || tab.browser == null || tab.browser.isDisposed()) return;
         if (!tab.loading) beginLoading(tab);
         tab.navigationGeneration++;
+        if (!"rigel://home".equals(url)) {
+            // Leaving the home page: restore the opaque page background real
+            // sites expect. The window-level glass material stays installed;
+            // an opaque WKWebView simply covers it.
+            tab.browser.setTransparent(false);
+        }
         boolean accepted = "rigel://home".equals(url)
                 ? renderHome(tab)
                 : tab.browser.setUrl(url);
@@ -1835,6 +1918,10 @@ public class TabManager {
 
     private boolean renderHome(TabData tab) {
         if (tab == null || tab.browser == null || tab.browser.isDisposed()) return false;
+        // Home keeps its own designed (opaque) background. Glass lives in the
+        // window chrome — the strips that used to be flat grey — not in page
+        // space, so the webview is explicitly back to opaque here.
+        tab.browser.setTransparent(false);
         boolean accepted = tab.browser.setText(buildHomeHtml(), true);
         if (accepted) tab.renderedHomeVersion = homeRenderVersion;
         else {
@@ -1888,6 +1975,11 @@ public class TabManager {
             public void changed(String location) {
                 if ("rigel://home".equals(location) ||
                     "about:blank".equals(location)) return;
+
+                // In-page navigation onto a real site: make sure any
+                // transparency left over from rigel://home is dropped so the
+                // page renders its own opaque background.
+                if (!b.isDisposed()) b.setTransparent(false);
 
                 tab.url = location;
                 try {
@@ -2229,6 +2321,118 @@ public class TabManager {
                 && browser.addDocumentStartScript(KEY_FOCUS_JS);
     }
 
+    /**
+     * Document-start scripts installed for every tab: the keyboard focus
+     * shim, the Chrome-style background-tab throttle, and the CSS anchor
+     * positioning polyfill for older system WebKits (see ANCHOR_POLYFILL_JS).
+     */
+    private static void installDocumentScripts(RigelBrowser browser) {
+        installKeyboardFocusDocumentScript(browser);
+        browser.addDocumentStartScript(BACKGROUND_THROTTLE_JS);
+        browser.addDocumentStartScript(ANCHOR_POLYFILL_JS);
+        // Also run the throttle shim on the document that is already loaded
+        // (the home page renders immediately after creation).
+        if (!browser.isDisposed()) {
+            try {
+                browser.execute(BACKGROUND_THROTTLE_JS);
+            } catch (org.eclipse.swt.SWTException ignored) {
+            }
+        }
+    }
+
+    /**
+     * Old system WebKit builds (e.g. M3 MacBook Air machines that have not
+     * updated to the macOS release that shipped CSS Anchor Positioning, while
+     * newer hardware like an M4 Mac mini already runs it) cannot anchor a
+     * popover to its trigger button or use position-try fallbacks — the
+     * anchor()/position-area/position-try rules are simply dropped, so player
+     * settings menus land off-screen or never appear. Chromium has shipped
+     * anchor positioning for years, which is why the same sites work in
+     * Chrome. Polyfilling the feature brings those WebKits to parity; the
+     * polyfill itself only activates when native support is missing.
+     */
+    private static final String ANCHOR_POLYFILL_JS = loadResourceScript("anchor-polyfill.js");
+
+    private static String loadResourceScript(String name) {
+        try (InputStream input = TabManager.class.getResourceAsStream("/" + name)) {
+            if (input == null) {
+                System.err.println("[Rigel] Missing bundled script " + name);
+                return "";
+            }
+            return new String(input.readAllBytes(), StandardCharsets.UTF_8);
+        } catch (Exception failure) {
+            System.err.println("[Rigel] Could not load bundled script " + name + ": " + failure);
+            return "";
+        }
+    }
+
+    /**
+     * Chrome-style background tab throttling. Rigel keeps every tab's
+     * WKWebView mounted and visible to WebKit (z-ordered behind the active
+     * tab) so background media keeps playing and WebKit does not terminate
+     * or suspend those content processes. The cost of that design is that
+     * background pages keep running their animation timers at full speed.
+     * This shim pauses requestAnimationFrame and clamps setTimeout/
+     * setInterval to >= 1 second while the tab is backgrounded — the same
+     * throttling Chrome applies to background tabs — without touching media
+     * playback, WebSockets, or anything else. It is toggled per tab on
+     * switchTo().
+     */
+    private static final String BACKGROUND_THROTTLE_JS = """
+(function () {
+    if (window.__rigelThrottleShim) return;
+    window.__rigelThrottleShim = true;
+
+    var backgrounded = false;
+    var nativeRAF = window.requestAnimationFrame ? window.requestAnimationFrame.bind(window) : null;
+    var nativeCancelRAF = window.cancelAnimationFrame ? window.cancelAnimationFrame.bind(window) : null;
+    var nativeSetTimeout = window.setTimeout.bind(window);
+    var nativeSetInterval = window.setInterval.bind(window);
+    var held = new Map();
+    var nextId = 1;
+
+    function clampDelay(delay) {
+        if (!backgrounded) return delay;
+        delay = Number(delay) || 0;
+        return delay < 1000 ? 1000 : delay;
+    }
+
+    window.requestAnimationFrame = function (callback) {
+        if (!backgrounded && nativeRAF) return nativeRAF(callback);
+        var id = nextId++;
+        held.set(id, callback);
+        return id;
+    };
+    window.cancelAnimationFrame = function (id) {
+        if (held.has(id)) { held.delete(id); return; }
+        if (nativeCancelRAF) nativeCancelRAF(id);
+    };
+    window.setTimeout = function (callback, delay) {
+        return nativeSetTimeout(callback, clampDelay(delay));
+    };
+    window.setInterval = function (callback, delay) {
+        return nativeSetInterval(callback, clampDelay(delay));
+    };
+
+    window.__rigelSetBackgroundTab = function (on) {
+        on = !!on;
+        if (on === backgrounded) return backgrounded;
+        backgrounded = on;
+        try { document[on ? 'setAttribute' : 'removeAttribute']('data-rigel-background-tab', ''); } catch (e) {}
+        if (!on && nativeRAF) {
+            var pending = Array.from(held.values());
+            held.clear();
+            for (var i = 0; i < pending.length; i++) {
+                (function (cb) {
+                    nativeRAF(function (ts) { try { cb(ts); } catch (e) {} });
+                })(pending[i]);
+            }
+        }
+        return backgrounded;
+    };
+})();
+""";
+
     private static final String CLIPBOARD_SHIM_JS = """
 (function () {
     window.__rigelNativeClipboardEnabled = true;
@@ -2522,6 +2726,13 @@ public class TabManager {
     private TabData activeTab() {
         if (activeIndex < 0 || activeIndex >= tabs.size()) return null;
         return tabs.get(activeIndex);
+    }
+
+    /** Visual smoke test: snapshot (with alpha) of the active page to a PNG. */
+    void snapshotActive(String path) {
+        TabData tab = activeTab();
+        if (tab != null && tab.browser != null && !tab.browser.isDisposed())
+            tab.browser.snapshot(path);
     }
 
     private boolean isActive(TabData tab) {

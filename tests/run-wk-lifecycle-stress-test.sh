@@ -7,11 +7,20 @@ OUT="$(mktemp -d "${TMPDIR:-/tmp}/rigel-wk-lifecycle-test.XXXXXX")"
 trap 'rm -rf "$OUT"' EXIT
 
 "$ROOT/build.sh"
-if rg -a -q '_setExtensibleSSOEnabled:' "$ROOT/classes/native/libRigelWKWebView.dylib"; then
+# Portable fixed-string binary search: prefer ripgrep when present, fall back
+# to grep so the test also runs on machines without extra tooling.
+bin_contains() {
+  if command -v rg >/dev/null 2>&1; then
+    rg -a -q -F -- "$1" "$2"
+  else
+    grep -a -q -F -e "$1" "$2"
+  fi
+}
+if bin_contains '_setExtensibleSSOEnabled:' "$ROOT/classes/native/libRigelWKWebView.dylib"; then
   print -u2 "Unsafe AppSSO preference toggle is present in the native bridge"
   exit 1
 fi
-rg -a -q 'decidePolicyForSOAuthorizationLoadWithCurrentPolicy:' \
+bin_contains 'decidePolicyForSOAuthorizationLoadWithCurrentPolicy:' \
   "$ROOT/classes/native/libRigelWKWebView.dylib"
 "$JAVA_HOME/bin/javac" -encoding UTF-8 -Xlint:all \
   -cp "$ROOT/build/classes:$ROOT/lib/*" \

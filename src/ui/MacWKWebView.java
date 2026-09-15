@@ -80,6 +80,9 @@ final class MacWKWebView extends Composite {
         int rigel_wk_can_back(Pointer handle);
         int rigel_wk_can_forward(Pointer handle);
         void rigel_wk_set_frame(Pointer handle, double x, double y, double width, double height);
+        void rigel_wk_set_transparent(Pointer handle, int transparent);
+        int  rigel_wk_snapshot(Pointer handle, String path);
+        int  rigel_wk_set_page_zoom(Pointer handle, double zoom);
         void rigel_wk_focus(Pointer handle);
         int rigel_wk_edit_action(Pointer handle, int action);
         void rigel_wk_execute(Pointer handle, String javascript);
@@ -246,6 +249,25 @@ final class MacWKWebView extends Composite {
                 && bridge().rigel_wk_add_user_script(handle, javascript, 0) != 0;
     }
 
+    /** See rigel_wk_set_transparent in the native bridge. */
+    void setTransparent(boolean transparent) {
+        if (usable()) bridge().rigel_wk_set_transparent(handle, transparent ? 1 : 0);
+    }
+
+    /** Writes a PNG snapshot (with alpha) of the current page to {@code path}. */
+    boolean snapshot(String path) {
+        return usable() && bridge().rigel_wk_snapshot(handle, path) != 0;
+    }
+
+    /**
+     * Applies WebKit-native page zoom when available. Returns false when the
+     * running WebKit lacks the API and the caller must fall back to CSS zoom.
+     */
+    boolean setPageZoom(double zoom) {
+        return usable() && zoom >= 0.2 && zoom <= 5.0
+                && bridge().rigel_wk_set_page_zoom(handle, zoom) != 0;
+    }
+
     void evaluateAsync(String javascript, BiConsumer<String, String> completion) {
         if (!usable()) {
             completion.accept("", "WKWebView is disposed");
@@ -313,11 +335,19 @@ final class MacWKWebView extends Composite {
         }
     }
 
+    /**
+     * ALWAYS defers to the SWT event loop. These callbacks originate inside
+     * WebKit delegate / script-message invocations on the main thread; running
+     * Java listener code inline inside those callbacks let tab disposal and
+     * other UI mutation happen while the native stack was still using the
+     * objects being torn down (use-after-free crashes reported as hs_err logs,
+     * especially when opening/closing tabs rapidly). Posting to the event
+     * loop keeps every Java reaction off the WebKit call stack.
+     */
     private void dispatch(Runnable action) {
         if (isDisposed()) return;
         Display display = getDisplay();
-        if (Display.getCurrent() == display) action.run();
-        else display.asyncExec(() -> { if (!isDisposed()) action.run(); });
+        display.asyncExec(() -> { if (!isDisposed()) action.run(); });
     }
 
     private static Bridge bridge() {
@@ -333,6 +363,19 @@ final class MacWKWebView extends Composite {
                 loadFailure = failure;
                 throw new IllegalStateException("Could not load the WKWebView bridge", failure);
             }
+        }
+    }
+
+    /**
+     * Absolute path of the bundled native bridge dylib. MacVibrancy loads the
+     * same library with its own interface to reach the window-level glass
+     * entry points; JNA/dyld coalesce the duplicate handle.
+     */
+    static String bridgeLibraryPath() {
+        try {
+            return extractBridge().toAbsolutePath().toString();
+        } catch (Throwable failure) {
+            throw new IllegalStateException("Could not load the WKWebView bridge", failure);
         }
     }
 
@@ -384,8 +427,9 @@ final class MacWKWebView extends Composite {
             Runnable task = () -> {
                 if (!display.isDisposed()) completion.accept(value, error);
             };
-            if (Display.getCurrent() == display) task.run();
-            else display.asyncExec(task);
+            // Same re-entrancy rule as MacWKWebView.dispatch(): never run
+            // Java completions inside the native evaluation callback.
+            display.asyncExec(task);
         }
     }
 }

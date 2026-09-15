@@ -46,6 +46,7 @@ public class Settings {
     private static final String K_UPSTREAM_TYPE = "proxy.type";
     private static final String K_UPSTREAM_HOST = "proxy.host";
     private static final String K_UPSTREAM_PORT = "proxy.port";
+    private static final String K_DNS_MODE      = "dns.mode"; // system | cloudflare | google
     private static final String K_ZOOM          = "zoom";
     private static final String K_HISTORY_ON    = "history.enabled";
     private static final String K_NATIVE_CLIP   = "clipboard.native.enabled";
@@ -230,6 +231,13 @@ public class Settings {
         props.remove(K_UPSTREAM_TYPE);
         props.remove(K_UPSTREAM_HOST);
         props.remove(K_UPSTREAM_PORT);
+        save();
+    }
+
+    public String getDnsMode() { return props.getProperty(K_DNS_MODE, "cloudflare"); }
+    public void setDnsMode(String v) {
+        props.setProperty(K_DNS_MODE,
+                v == null || v.isBlank() ? "cloudflare" : v.trim().toLowerCase());
         save();
     }
 

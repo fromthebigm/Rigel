@@ -275,6 +275,27 @@ public final class RigelBrowser extends Composite {
         }
     }
 
+    /** Lets the window's vibrancy material show through (rigel://home only). */
+    public void setTransparent(boolean transparent) {
+        if (backend == Backend.WKWEBVIEW && wkWebView != null && !wkWebView.isDisposed())
+            wkWebView.setTransparent(transparent);
+    }
+
+    /** WK-only: PNG snapshot (alpha preserved) used by the visual smoke test. */
+    boolean snapshot(String path) {
+        return backend == Backend.WKWEBVIEW && wkWebView != null
+                && !wkWebView.isDisposed() && wkWebView.snapshot(path);
+    }
+
+    /**
+     * Applies WebKit-native page zoom when the running WebKit supports it.
+     * Returns false when the caller must fall back to CSS zoom.
+     */
+    public boolean setPageZoom(double zoom) {
+        return backend == Backend.WKWEBVIEW && wkWebView != null && !wkWebView.isDisposed()
+                && wkWebView.setPageZoom(zoom);
+    }
+
     public void back() { if (backend == Backend.WKWEBVIEW) wkWebView.back(); else swtBrowser.back(); }
     public void forward() { if (backend == Backend.WKWEBVIEW) wkWebView.forward(); else swtBrowser.forward(); }
     public void reload() { if (backend == Backend.WKWEBVIEW) wkWebView.reload(); else swtBrowser.refresh(); }

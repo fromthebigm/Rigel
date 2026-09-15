@@ -29,6 +29,7 @@ public final class BrowserApplication {
                 settings.isAv1NormalizationAllSitesEnabled());
         RigelBrowser.configureContentBlocking(settings.isBlocklistEnabled());
         Blocklist blocklist = new Blocklist(settings.isBlocklistEnabled());
+        proxy.SecureDns.setMode(proxy.SecureDns.Mode.fromSetting(settings.getDnsMode()));
         proxyServer = new ProxyServer(blocklist);
         try {
             proxyServer.start();
@@ -75,16 +76,25 @@ public final class BrowserApplication {
     }
 
     private void openWindow(boolean restoreSession) {
+        openWindow(restoreSession, null, -1, -1);
+    }
+
+    private void openWindow(boolean restoreSession, String initialUrl, int x, int y) {
         if (quitting || display.isDisposed()) return;
         BrowserUI window = new BrowserUI();
         windows.add(window);
         try {
             window.open(display, settings, bookmarks, history, proxyServer,
-                    () -> display.asyncExec(() -> openWindow(false)),
+                    // Deliberately synchronous: a tear-off must add the new
+                    // window to this list before the old (possibly now empty)
+                    // window finishes closing, or the run loop could see an
+                    // empty window list and quit mid-drag.
+                    (url, px, py) -> openWindow(false, url, px, py),
                     this::quit,
                     () -> windows.remove(window),
                     this::broadcastSharedSettings,
-                    restoreSession);
+                    restoreSession,
+                    initialUrl, x, y);
         } catch (Throwable failure) {
             windows.remove(window);
             throw failure;

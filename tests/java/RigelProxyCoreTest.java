@@ -6,6 +6,7 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
 import java.io.InputStream;
+import java.io.PushbackInputStream;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.Inet4Address;
@@ -47,6 +48,22 @@ public final class RigelProxyCoreTest {
         System.setProperty("https.proxyPort", "9");
 
         int preferredPort = availableTcpPort();
+
+        // SecureDns basics (deterministic, offline): IP literals and the
+        // loopback shortcut must resolve without any network access.
+        proxy.SecureDns.setMode(proxy.SecureDns.Mode.SYSTEM);
+        require(proxy.SecureDns.Mode.fromSetting("https") == proxy.SecureDns.Mode.CLOUDFLARE,
+                "invalid DNS mode setting should fall back to Cloudflare DoH");
+        require("google".equals(proxy.SecureDns.Mode.GOOGLE.settingValue()),
+                "DNS mode setting value changed");
+        InetSocketAddress literal = proxy.SecureDns.resolve("127.0.0.9", 443);
+        require("127.0.0.9".equals(literal.getAddress().getHostAddress()),
+                "SecureDns rewrote an IPv4 literal");
+        require(proxy.SecureDns.resolve("localhost", 443).getAddress().isLoopbackAddress(),
+                "SecureDns did not resolve localhost locally");
+        require(proxy.SecureDns.resolve("1.1.1.1", 53).getAddress().getHostAddress()
+                        .equals("1.1.1.1"),
+                "SecureDns did not treat resolver IPs as literals");
         HttpServer destination = HttpServer.create(new InetSocketAddress(LOOPBACK, 0), 0);
         destination.createContext("/direct", exchange -> {
             byte[] body = "DIRECT_OK".getBytes(StandardCharsets.UTF_8);
@@ -144,6 +161,29 @@ public final class RigelProxyCoreTest {
                     require(networkAddress.getHostAddress().equals(response.host()),
                             "non-loopback SOCKS5 UDP response reported the wrong source");
                 }
+            }
+
+            try (MockHttpProxy upstream = new MockHttpProxy()) {
+                proxy.setUpstream(ProxyServer.UpstreamType.HTTPS,
+                        "127.0.0.1", upstream.port());
+                URI throughUpstream = URI.create("http://rigel-upstream.invalid/probe");
+                try {
+                    get(client, throughUpstream);
+                } catch (Exception expectedAfterHandshakeFailure) {
+                    // The mock speaks plain HTTP; the TLS handshake cannot
+                    // complete. What matters is what reached the listener.
+                }
+                byte[] firstBytes = upstream.firstBytes().get(5, TimeUnit.SECONDS);
+                require(firstBytes.length >= 3
+                                && firstBytes[0] == 0x16
+                                && firstBytes[1] == 0x03
+                                && (firstBytes[2] >= 0x01 && firstBytes[2] <= 0x04),
+                        "HTTPS upstream did not receive a TLS ClientHello");
+                require(udpAssociationStatus(browserPort) == 0x07,
+                        "UDP was not rejected for a TCP-only HTTPS upstream");
+                require("DIRECT_OK".equals(get(client, direct)),
+                        "localhost was incorrectly routed through the HTTPS upstream");
+                proxy.clearUpstream();
             }
 
             try (MockHttpProxy upstream = new MockHttpProxy()) {
@@ -698,6 +738,7 @@ public final class RigelProxyCoreTest {
     private static final class MockHttpProxy implements AutoCloseable {
         private final ServerSocket server;
         private final CompletableFuture<String> request = new CompletableFuture<>();
+        private final CompletableFuture<byte[]> firstBytes = new CompletableFuture<>();
         private final Thread worker;
 
         MockHttpProxy() throws Exception {
@@ -708,10 +749,24 @@ public final class RigelProxyCoreTest {
 
         int port() { return server.getLocalPort(); }
         CompletableFuture<String> request() { return request; }
+        CompletableFuture<byte[]> firstBytes() { return firstBytes; }
 
         private void serve() {
             try (Socket socket = server.accept()) {
-                String headers = readHeaders(socket.getInputStream());
+                // Capture the leading bytes before HTTP parsing so tests can
+                // distinguish plaintext proxying from a TLS ClientHello.
+                InputStream input = socket.getInputStream();
+                byte[] lead = new byte[3];
+                int read = 0;
+                while (read < lead.length) {
+                    int count = input.read(lead, read, lead.length - read);
+                    if (count < 0) throw new EOFException();
+                    read += count;
+                }
+                firstBytes.complete(lead);
+                PushbackInputStream rewind = new PushbackInputStream(input, lead.length);
+                rewind.unread(lead);
+                String headers = readHeaders(rewind);
                 request.complete(headers);
                 byte[] body = "UPSTREAM_OK".getBytes(StandardCharsets.UTF_8);
                 String response = "HTTP/1.1 200 OK\r\nContent-Length: " + body.length

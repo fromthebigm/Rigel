@@ -48,15 +48,41 @@ public class SwitchableProxy implements ChainedProxyManager {
         chainedProxies.add(new ChainedProxyAdapter() {
             @Override
             public InetSocketAddress getChainedProxyAddress() {
-                return new InetSocketAddress(upstream.host(), upstream.port());
+                try {
+                    // Resolve through SecureDns; an eager InetSocketAddress
+                    // would leak the upstream hostname to the system resolver.
+                    return SecureDns.resolve(upstream.host(), upstream.port());
+                } catch (java.net.UnknownHostException failure) {
+                    return InetSocketAddress.createUnresolved(
+                            upstream.host(), upstream.port());
+                }
             }
             @Override
             public ChainedProxyType getChainedProxyType() {
                 return switch (upstream.type()) {
-                    case HTTP -> ChainedProxyType.HTTP;
+                    case HTTP, HTTPS -> ChainedProxyType.HTTP;
                     case SOCKS4 -> ChainedProxyType.SOCKS4;
                     case SOCKS5 -> ChainedProxyType.SOCKS5;
                 };
+            }
+            @Override
+            public boolean requiresEncryption() {
+                // HTTPS upstreams terminate the CONNECT chain inside TLS, so
+                // nothing between Rigel and the upstream can read hostnames.
+                return upstream.type() == ProxyServer.UpstreamType.HTTPS;
+            }
+            @Override
+            public javax.net.ssl.SSLEngine newSslEngine() {
+                // ChainedProxyAdapter's default returns null; LittleProxy
+                // dereferences it unconditionally for encrypted upstreams.
+                try {
+                    javax.net.ssl.SSLEngine engine = javax.net.ssl.SSLContext.getDefault()
+                            .createSSLEngine(upstream.host(), upstream.port());
+                    engine.setUseClientMode(true);
+                    return engine;
+                } catch (Exception failure) {
+                    return null;
+                }
             }
         });
     }
