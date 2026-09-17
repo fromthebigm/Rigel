@@ -845,7 +845,7 @@ public class BrowserUI {
 
         Composite sideHeader = new Composite(
                 sidebarComposite, SWT.NO_BACKGROUND | SWT.DOUBLE_BUFFERED);
-        sideHeader.setBackground(chromeWidgetBackground(colSidebarDeep));
+        sideHeader.setBackground(chromeWidgetBackground(colSidebarBg));
         sideHeader.setBackgroundMode(SWT.INHERIT_FORCE);
         sideHeader.setLayoutData(new GridData(SWT.FILL, SWT.TOP, true, false));
         GridLayout shl = new GridLayout(2, false);
@@ -859,11 +859,11 @@ public class BrowserUI {
         sideTitle.setText("TABS");
         sideTitle.setFont(fontSectionLabel);
         sideTitle.setForeground(colTextMuted);
-        sideTitle.setBackground(chromeWidgetBackground(colSidebarDeep));
+        sideTitle.setBackground(chromeWidgetBackground(colSidebarBg));
         sideTitle.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
 
         RoundedIconLabel plusSide = makeIconLabel(sideHeader, "plus", "New Tab (Cmd+T)",
-                chromeWidgetBackground(colSidebarDeep));
+                chromeWidgetBackground(colSidebarBg));
         plusSide.addMouseListener(clickOn(() -> tabManager.createTab("New Tab", "rigel://home")));
 
         tabScroll = new org.eclipse.swt.custom.ScrolledComposite(

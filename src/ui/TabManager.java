@@ -192,10 +192,29 @@ public class TabManager {
         sb.append("    if (typeof window.rigelHomeNavigate !== 'function') return; e.preventDefault(); window.rigelHomeNavigate(a.href);\n");
         sb.append("  });\n");
         sb.append("  document.getElementById('q').addEventListener('input', function(){ this.style.color='#").append(textFg).append("'; this.style.webkitTextFillColor='#").append(textFg).append("'; });\n");
+        // Some hosting/focus states let macOS insert private-use-area characters
+        // (U+E000-U+F8FF, e.g. arrow key glyphs) into really focused web inputs.
+        // Never let them into the search text: strip them and restore the caret.
+        sb.append("  q.addEventListener('input', function(e){ var v=q.value, out='', dirty=false, idx=0, removed=0;\n");
+        sb.append("    for (const ch of v) { var c = ch.codePointAt(0);\n");
+        sb.append("      if (c >= 0xE000 && c <= 0xF8FF) { dirty = true; if (idx < q.selectionStart) removed += ch.length; }\n");
+        sb.append("      else out += ch;\n");
+        sb.append("      idx += ch.length; }\n");
+        sb.append("    if (dirty) { var s = Math.max(0, q.selectionStart - removed);\n");
+        sb.append("      q.value = out; try { q.setSelectionRange(s, s); } catch (err) {} }\n");
+        sb.append("  }, true);\n");
         sb.append("  window.addEventListener('pointerdown', function(){ userInteracted = true; }, {once:true, capture:true});\n");
         sb.append("  window.addEventListener('keydown', function(){ userInteracted = true; }, {once:true, capture:true});\n");
         sb.append("  function focusSearchOnce(){ if (userInteracted || !document.hasFocus()) return; var a=document.activeElement; if(a && a!==document.body && a!==document.documentElement && a!==q) return; try{q.focus({preventScroll:true});}catch(e){q.focus();} }\n");
         sb.append("  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', focusSearchOnce, {once:true}); else requestAnimationFrame(focusSearchOnce);\n");
+        if (System.getenv("RIGEL_KEY_DIAG") != null) {
+            sb.append("  (function(){\n");
+            sb.append("    function det(e){ var v=q.value; var d='[KEYDIAG] '+e.type+' key='+e.key+' code='+e.keyCode+' inputType='+(e.inputType||'')+' value='+JSON.stringify(v)+' sel='+q.selectionStart; try{window.webkit.messageHandlers.rigelDiagnostics.postMessage(d);}catch(x){} }\n");
+            sb.append("    q.addEventListener('keydown', det, true);\n");
+            sb.append("    q.addEventListener('beforeinput', det, true);\n");
+            sb.append("    q.addEventListener('input', det, true);\n");
+            sb.append("  })();\n");
+        }
         sb.append("</script>\n</body>\n</html>");
         return sb.toString();
     }

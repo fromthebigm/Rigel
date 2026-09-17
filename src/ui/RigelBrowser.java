@@ -247,7 +247,7 @@ public final class RigelBrowser extends Composite {
     }
 
     /** Installs a document-start script in every frame of future WK pages. */
-    boolean addDocumentStartScript(String javascript) {
+    public boolean addDocumentStartScript(String javascript) {
         if (javascript == null || javascript.isBlank() || isDisposed()) return false;
         // SWT has no equivalent persistent all-frame hook. Its fallback is
         // injected after each completed navigation by TabManager.
@@ -282,7 +282,7 @@ public final class RigelBrowser extends Composite {
     }
 
     /** WK-only: PNG snapshot (alpha preserved) used by the visual smoke test. */
-    boolean snapshot(String path) {
+    public boolean snapshot(String path) {
         return backend == Backend.WKWEBVIEW && wkWebView != null
                 && !wkWebView.isDisposed() && wkWebView.snapshot(path);
     }

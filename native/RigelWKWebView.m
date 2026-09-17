@@ -558,6 +558,13 @@ static NSString *TikTokNetworkDiagnosticsScript(void) {
     // receive duplicate insertions, while preserving separate repeat events.
     if (event == self.rigelLastKeyDownEvent) return;
     self.rigelLastKeyDownEvent = event;
+    if (getenv("RIGEL_KEY_DIAG") != NULL) {
+        NSLog(@"[KEYDIAG] native keyDown keyCode=%u chars=%@ charsIgnoring=%@ "
+              "firstResponder=%@",
+              (unsigned int)event.keyCode, event.characters,
+              event.charactersIgnoringModifiers,
+              NSStringFromClass(self.window.firstResponder.class));
+    }
     [self rigelRecordTrustedInput];
     if (event.keyCode == 53) [self rigelRecoverAppleLoginOnEscape];
     NSString *mirrorScript = [self rigelShouldMirrorArrowKeys] ? [self rigelArrowMirrorScriptForEvent:event] : nil;
@@ -1265,6 +1272,7 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
     if ([name isEqualToString:@"rigelDiagnostics"]
             && (getenv("RIGEL_TIKTOK_DIAGNOSTICS") != NULL
                 || getenv("RIGEL_LOGIN_DIAGNOSTICS") != NULL
+                || getenv("RIGEL_KEY_DIAG") != NULL
                 || getenv("RIGEL_LOGIN_AUTOTEST") != NULL)) {
         if ([message.body isKindOfClass:[NSString class]])
             NSLog(@"[Rigel diagnostics] %@", (NSString *)message.body);
@@ -2287,3 +2295,8 @@ void rigel_field_set_glass(void *viewPtr, int enabled,
                                                 alpha:1.0];
     [field setNeedsDisplay:YES];
 }
+
+// (RIGEL_KEY_DIAG diagnostic instrumentation was used to investigate arrow-key
+// handling; the page-level hook lives in TabManager's home page behind the
+// same environment flag.)
+
