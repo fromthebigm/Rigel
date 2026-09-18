@@ -59,7 +59,7 @@ public class ProxyServer {
     private volatile Upstream upstream;
     private final Blocklist blocklist;
     private final int preferredLocalPort;
-    private LoopbackSocks5Server browserProxy;
+    private volatile LoopbackSocks5Server browserProxy;
 
     public ProxyServer() {
         this(new Blocklist(false), DEFAULT_LOCAL_PORT);

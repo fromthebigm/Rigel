@@ -270,7 +270,10 @@ public final class RigelBrowser extends Composite {
                         ? null : new IllegalStateException(error));
             });
         } else {
-            try { completion.accept(swtBrowser.evaluate(javascript), null); }
+            // SWT's Browser.evaluate has no block scoping: statements that
+            // start with top-level `return` (all our callers use this form)
+            // would be a SyntaxError without the wrap the WK path applies.
+            try { completion.accept(swtBrowser.evaluate("(function(){" + javascript + "})()"), null); }
             catch (Throwable failure) { completion.accept(null, failure); }
         }
     }

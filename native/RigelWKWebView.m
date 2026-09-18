@@ -590,6 +590,10 @@ static NSString *TikTokNetworkDiagnosticsScript(void) {
 @property(nonatomic, assign) int64_t lastCompleted;
 @property(nonatomic, assign) int64_t lastTotal;
 @property(nonatomic, assign) BOOL cancelled;
+// Set when the user explicitly replaced an existing file in the save panel.
+// Such a file must NEVER be removed by us: the original contents belong to
+// the user even if the replacement download fails or is cancelled.
+@property(nonatomic, assign) BOOL replacedExistingFile;
 @end
 
 @implementation RigelWKDownloadState
@@ -689,7 +693,8 @@ static NSString *TikTokNetworkDiagnosticsScript(void) {
     NSProgress *progress = download.progress;
     state.lastCompleted = progress.completedUnitCount;
     state.lastTotal = progress.totalUnitCount;
-    if (![event isEqualToString:@"finished"] && state.path.length > 0) {
+    if (![event isEqualToString:@"finished"] && state.path.length > 0
+            && !state.replacedExistingFile) {
         [NSFileManager.defaultManager removeItemAtPath:state.path error:nil];
     }
     [self emitDownloadEvent:event state:state error:error];
@@ -708,7 +713,6 @@ static NSString *SafeDownloadName(NSString *suggested) {
 }
 
 static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
-    NSFileManager *files = NSFileManager.defaultManager;
     NSString *stem = fileName.stringByDeletingPathExtension;
     NSString *extension = fileName.pathExtension;
     for (NSUInteger suffix = 0; suffix < 10000; suffix++) {
@@ -720,7 +724,15 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
                 ? base : [base stringByAppendingPathExtension:extension];
         }
         NSURL *url = [directory URLByAppendingPathComponent:candidate isDirectory:NO];
-        if (![files fileExistsAtPath:url.path]) return url;
+        // Reserve atomically: a plain fileExistsAtPath check races with a
+        // second download that decides the same name before WebKit has
+        // materialized the first file. WebKit happily writes over this
+        // zero-byte placeholder when the real content arrives.
+        if ([NSFileManager.defaultManager createFileAtPath:url.path
+                                                  contents:nil
+                                                attributes:@{NSFilePosixPermissions: @(0644)}]) {
+            return url;
+        }
     }
     return [directory URLByAppendingPathComponent:
         [NSString stringWithFormat:@"%@-%@", NSUUID.UUID.UUIDString, fileName]
@@ -1210,16 +1222,11 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
             return;
         }
         NSURL *selected = panel.URL;
-        if ([NSFileManager.defaultManager fileExistsAtPath:selected.path]) {
-            NSError *removeError = nil;
-            [NSFileManager.defaultManager removeItemAtURL:selected error:&removeError];
-            if (removeError != nil) {
-                [self completeDownload:download event:@"failed"
-                                 error:removeError.localizedDescription ?: @"Could not replace file"];
-                completionHandler(nil);
-                return;
-            }
-        }
+        // WebKit replaces the destination itself when the download actually
+        // finishes. Pre-deleting the user's existing file here would destroy
+        // it permanently if the download is then cancelled or fails.
+        state.replacedExistingFile =
+            [NSFileManager.defaultManager fileExistsAtPath:selected.path];
         begin(selected);
     };
     if (_webView.window != nil) {
@@ -1823,7 +1830,7 @@ void rigel_wk_destroy(void *handle) {
         for (RigelWKDownloadState *state in controller.downloads.allValues) {
             state.cancelled = YES;
             [state.download cancel:nil];
-            if (state.path.length > 0)
+            if (state.path.length > 0 && !state.replacedExistingFile)
                 [NSFileManager.defaultManager removeItemAtPath:state.path error:nil];
         }
     }

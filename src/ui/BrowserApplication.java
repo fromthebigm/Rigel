@@ -97,6 +97,10 @@ public final class BrowserApplication {
                     initialUrl, x, y);
         } catch (Throwable failure) {
             windows.remove(window);
+            // The shell may already exist even when open() blew up partway
+            // (e.g. WKWebView unavailable); always release it.
+            org.eclipse.swt.widgets.Shell created = window.getShell();
+            if (created != null && !created.isDisposed()) created.dispose();
             throw failure;
         }
     }

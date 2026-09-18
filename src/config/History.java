@@ -51,7 +51,15 @@ public class History {
                 System.err.println("[Rigel] History file is too large; ignoring it");
                 return;
             }
-            try (BufferedReader reader = Files.newBufferedReader(file)) {
+            // A crash mid-append can leave a torn partial line at the tail;
+            // without an ending newline it is untrustworthy, so ignore it.
+            byte[] raw = Files.readAllBytes(file);
+            int end = raw.length;
+            if (end > 0 && raw[end - 1] != '\n') {
+                while (end > 0 && raw[end - 1] != '\n') end--;
+            }
+            String text = new String(raw, 0, end, java.nio.charset.StandardCharsets.UTF_8);
+            try (BufferedReader reader = new BufferedReader(new java.io.StringReader(text))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
                     if (line.length() > MAX_LINE_CHARS) continue;

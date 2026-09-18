@@ -72,8 +72,16 @@ public final class LoopbackSocks5Server implements AutoCloseable {
 
         try {
             ServerSocket socket = new ServerSocket();
-            socket.setReuseAddress(true);
-            socket.bind(new InetSocketAddress(LOOPBACK_V4, 0), 128);
+            try {
+                socket.setReuseAddress(true);
+                socket.bind(new InetSocketAddress(LOOPBACK_V4, 0), 128);
+            } catch (IOException bindFailure) {
+                try {
+                    socket.close();
+                } catch (IOException ignored) {
+                }
+                throw bindFailure;
+            }
             littleProxyPort = targetLittleProxyPort;
             server = socket;
             listener = Thread.ofPlatform()
@@ -103,17 +111,31 @@ public final class LoopbackSocks5Server implements AutoCloseable {
     }
 
     private void acceptLoop() {
+        int consecutiveFailures = 0;
         while (server != null) {
             try {
                 Socket client = server.accept();
+                consecutiveFailures = 0;
                 clients.add(client);
                 Thread.ofVirtual()
                         .name("rigel-socks5-client")
                         .start(() -> handle(client));
             } catch (IOException error) {
                 if (server != null) {
-                    System.err.println("[Rigel] SOCKS5 ingress accept failed: "
-                            + error.getMessage());
+                    consecutiveFailures++;
+                    // Back off on persistent accept() failures (e.g. FD
+                    // exhaustion at macOS's soft limit): instant retries would
+                    // spin the thread at 100% CPU and flood stderr.
+                    if (consecutiveFailures <= 5) {
+                        System.err.println("[Rigel] SOCKS5 ingress accept failed: "
+                                + error.getMessage());
+                    }
+                    try {
+                        Thread.sleep(Math.min(2_000, 100L << Math.min(consecutiveFailures, 4)));
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
                 }
             }
         }
@@ -264,6 +286,23 @@ public final class LoopbackSocks5Server implements AutoCloseable {
             AtomicReference<InetSocketAddress> clientEndpoint = new AtomicReference<>();
             ConcurrentHashMap<InetSocketAddress, AtomicLong> directDestinations =
                     new ConcurrentHashMap<>();
+            if (selectedUpstream != null) {
+                // RFC 1928 ties the UDP association to the *upstream* control
+                // connection too; without this watcher a dead upstream would
+                // blackhole UDP silently.
+                Thread.ofVirtual()
+                        .name("rigel-socks5-udp-upstream-watch")
+                        .start(() -> {
+                            try {
+                                byte[] drain = new byte[256];
+                                while (selectedUpstream.control.getInputStream().read(drain) >= 0) { }
+                            } catch (Exception ignored) {
+                            }
+                            active.set(false);
+                            clientRelay.close();
+                            networkRelay.close();
+                        });
+            }
             Thread outbound = Thread.ofVirtual()
                     .name("rigel-socks5-udp-out")
                     .start(() -> relayUdpFromClient(clientRelay, networkRelay,

@@ -79,6 +79,12 @@ public class SwitchableProxy implements ChainedProxyManager {
                     javax.net.ssl.SSLEngine engine = javax.net.ssl.SSLContext.getDefault()
                             .createSSLEngine(upstream.host(), upstream.port());
                     engine.setUseClientMode(true);
+                    // Without HTTPS endpoint identification a CA-valid cert for
+                    // the *wrong* name would be accepted, silently allowing a
+                    // MITM between Rigel and the upstream.
+                    javax.net.ssl.SSLParameters params = engine.getSSLParameters();
+                    params.setEndpointIdentificationAlgorithm("HTTPS");
+                    engine.setSSLParameters(params);
                     return engine;
                 } catch (Exception failure) {
                     return null;

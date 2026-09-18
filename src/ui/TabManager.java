@@ -1436,7 +1436,13 @@ public class TabManager {
         container.setBackgroundMode(SWT.INHERIT_FORCE);
         container.setLayout(new FillLayout());
 
-        RigelBrowser browser = new RigelBrowser(container, SWT.NO_BACKGROUND);
+        RigelBrowser browser;
+        try {
+            browser = new RigelBrowser(container, SWT.NO_BACKGROUND);
+        } catch (Throwable constructionFailure) {
+            container.dispose();
+            throw constructionFailure;
+        }
         installDocumentScripts(browser);
 
         TabData tab = new TabData(container, browser, title, initialUrl);
@@ -1496,7 +1502,13 @@ public class TabManager {
         container.setBackgroundMode(SWT.INHERIT_FORCE);
         container.setLayout(new FillLayout());
 
-        RigelBrowser browser = new RigelBrowser(container, SWT.NO_BACKGROUND);
+        RigelBrowser browser;
+        try {
+            browser = new RigelBrowser(container, SWT.NO_BACKGROUND);
+        } catch (Throwable constructionFailure) {
+            container.dispose();
+            throw constructionFailure;
+        }
         installDocumentScripts(browser);
         TabData tab = new TabData(container, browser, title, url);
         tabs.add(tab);

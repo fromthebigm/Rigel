@@ -362,6 +362,7 @@ public class BrowserUI {
 
         shell.addDisposeListener(e -> {
             saveSession();
+            cancelTabDrag();
             if (keyFilter != null) display.removeFilter(SWT.KeyDown, keyFilter);
             if (display.getData(DATA_ACTIVE_WINDOW) == this) display.setData(DATA_ACTIVE_WINDOW, null);
             Runnable closed = windowClosedAction;
@@ -560,29 +561,32 @@ public class BrowserUI {
         sidebarMode = useSidebar;
         Display d = shell.getDisplay();
         allocColors(d);
-        // Full UI rebuild so every widget picks up new colors
-        if (sidebarMode) buildSidebarLayout();
-        else            buildTopBarLayout();
-        if (tabManager != null) tabManager.reattach(contentArea, stackLayout);
-        refreshTabStrip();
-        syncAddressAndNavigation();
-        // Re-render the active tab's home page if it is showing rigel://home,
-        // so the new theme colours are visible immediately without a manual reload.
-        // The active home tab updates immediately; background home tabs are
-        // versioned and update lazily when selected. Real pages are untouched.
-        if (tabManager != null) tabManager.refreshActiveHomeTab();
-        shell.setBackground(colChromeDeep);
-        if (contentArea != null && !contentArea.isDisposed()) {
-            contentArea.redraw();
+        try {
+            // Full UI rebuild so every widget picks up new colors
+            if (sidebarMode) buildSidebarLayout();
+            else            buildTopBarLayout();
+            if (tabManager != null) tabManager.reattach(contentArea, stackLayout);
+            refreshTabStrip();
+            syncAddressAndNavigation();
+            // Re-render the active tab's home page if it is showing rigel://home,
+            // so the new theme colours are visible immediately without a manual reload.
+            // The active home tab updates immediately; background home tabs are
+            // versioned and update lazily when selected. Real pages are untouched.
+            if (tabManager != null) tabManager.refreshActiveHomeTab();
+            shell.setBackground(colChromeDeep);
+            if (contentArea != null && !contentArea.isDisposed()) {
+                contentArea.redraw();
+            }
+            enforceFullscreenChromeState();
+            shell.layout(true, true);
+            shell.redraw();
+            restoreFindBar(suspendedFind);
+            // Final glass re-apply after all view surgery: the rebuild above can
+            // reorder the native effect view over the chrome; this re-pins it.
+            applyNativeGlass();
+        } finally {
+            disposeColors(retiredColors);
         }
-        enforceFullscreenChromeState();
-        shell.layout(true, true);
-        shell.redraw();
-        restoreFindBar(suspendedFind);
-        // Final glass re-apply after all view surgery: the rebuild above can
-        // reorder the native effect view over the chrome; this re-pins it.
-        applyNativeGlass();
-        disposeColors(retiredColors);
         MacWindowCaptureProtection.protectSoon(shell);
     }
 
@@ -1244,6 +1248,7 @@ public class BrowserUI {
     private int tabDragInsertion = -1;
     private boolean dragClickConsumed;
     private Listener tabDragFilter;
+    private Display dragFilterDisplay;
 
     /** Call from a tab control's mouseDown; arms (but does not start) a drag. */
     private void armTabDrag(Canvas control, TabManager.TabData tab) {
@@ -1261,8 +1266,9 @@ public class BrowserUI {
                 else if (event.type == SWT.MouseUp) finishTabDrag(event);
             };
         }
-        control.getDisplay().addFilter(SWT.MouseMove, tabDragFilter);
-        control.getDisplay().addFilter(SWT.MouseUp, tabDragFilter);
+        dragFilterDisplay = control.getDisplay();
+        dragFilterDisplay.addFilter(SWT.MouseMove, tabDragFilter);
+        dragFilterDisplay.addFilter(SWT.MouseUp, tabDragFilter);
     }
 
     private void updateTabDrag() {
@@ -1350,17 +1356,22 @@ public class BrowserUI {
     }
 
     private void removeTabDragFilters() {
-        if (shell == null || shell.isDisposed() || tabDragFilter == null) {
+        // Always detach via the remembered Display: if the window closed
+        // mid-drag the filter must still come off, or it leaks (capturing
+        // this whole BrowserUI) and keeps firing on every mouse event.
+        Display display = dragFilterDisplay;
+        if (tabDragFilter == null || display == null) {
             tabDragFilter = null;
+            dragFilterDisplay = null;
             return;
         }
-        Display display = shell.getDisplay();
         try {
             display.removeFilter(SWT.MouseMove, tabDragFilter);
             display.removeFilter(SWT.MouseUp, tabDragFilter);
         } catch (Throwable ignored) {
         }
         tabDragFilter = null;
+        dragFilterDisplay = null;
     }
 
     /** True when the just-finished press was consumed by a tab drag. */
@@ -2296,7 +2307,13 @@ public class BrowserUI {
             targetPath = fd.open();
             if (targetPath == null) return;
         } else {
-            targetPath = java.nio.file.Paths.get(expandUserPath(settings.getDownloadDir()), suggested).toString();
+            try {
+                targetPath = java.nio.file.Paths.get(
+                        expandUserPath(settings.getDownloadDir()), suggested).toString();
+            } catch (java.nio.file.InvalidPathException badPath) {
+                showError(shell, "Could not create a file name for this download.");
+                return;
+            }
         }
         final String dest = targetPath;
         DownloadRecord record = new DownloadRecord("", null, suggested, url, dest);
@@ -2308,7 +2325,17 @@ public class BrowserUI {
                         .uri(java.net.URI.create(url)).build();
                 java.nio.file.Path out = java.nio.file.Paths.get(dest);
                 if (out.getParent() != null) java.nio.file.Files.createDirectories(out.getParent());
-                DOWNLOAD_CLIENT.send(req, java.net.http.HttpResponse.BodyHandlers.ofFile(out));
+                var response = DOWNLOAD_CLIENT.send(
+                        req, java.net.http.HttpResponse.BodyHandlers.ofFile(out));
+                int statusCode = response.statusCode();
+                if (statusCode < 200 || statusCode >= 300) {
+                    // An error page must not masquerade as a finished download.
+                    java.nio.file.Files.deleteIfExists(out);
+                    record.status = "Failed: HTTP " + statusCode;
+                    runOnUi(() -> showError(shell,
+                            "Download failed: server answered HTTP " + statusCode + "."));
+                    return;
+                }
                 record.status = "Finished";
                 runOnUi(() -> presentStatus("Downloaded " + suggested));
             } catch (Exception ex) {
@@ -2686,6 +2713,13 @@ public class BrowserUI {
         String s = name == null || name.isBlank() ? "page" : name;
         s = s.replaceAll("[\\\\/:*?\"<>|]+", "_").trim();
         if (s.length() > 80) s = s.substring(0, 80);
+        // Truncation can split a surrogate pair; a dangling half blows up
+        // Paths.get with InvalidPathException.
+        while (!s.isEmpty() && Character.isHighSurrogate(s.charAt(s.length() - 1))) {
+            s = s.substring(0, s.length() - 1);
+        }
+        // Control characters are also rejected by Paths on some filesystems.
+        s = s.replaceAll("[\\p{Cntrl}]", "");
         return s.isBlank() ? "page" : s;
     }
 

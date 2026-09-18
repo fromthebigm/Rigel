@@ -21,11 +21,22 @@ final class AtomicFiles {
         Path temporary = Files.createTempFile(parent, "." + target.getFileName() + ".", ".tmp");
         try {
             writer.write(temporary);
+            // Force the temp file's bytes to storage before the rename so a
+            // crash cannot persist the name without its contents.
+            try (var channel = java.nio.channels.FileChannel.open(
+                    temporary, java.nio.file.StandardOpenOption.WRITE)) {
+                channel.force(false);
+            }
             try {
                 Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE,
                         StandardCopyOption.REPLACE_EXISTING);
             } catch (AtomicMoveNotSupportedException ignored) {
                 Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING);
+            }
+            // Best effort: persist the directory entry too.
+            try (var dirChannel = java.nio.channels.FileChannel.open(parent)) {
+                dirChannel.force(true);
+            } catch (IOException | UnsupportedOperationException ignored) {
             }
         } finally {
             Files.deleteIfExists(temporary);
