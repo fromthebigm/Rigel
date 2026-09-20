@@ -1355,12 +1355,25 @@ public class TabManager {
         public       int       progress;
         long navigationGeneration;
         long renderedHomeVersion;
+        // ── Tab sleep (RAM discard) state ──
+        /** True while the page content has been unloaded to reclaim memory. */
+        public boolean sleeping;
+        /** URL + scroll snapshot, taken just before the page was discarded. */
+        String  sleepUrl;
+        String  sleepTitle;
+        int     sleepScrollX;
+        int     sleepScrollY;
+        /** Wall clock of the last time this tab stopped being active (0 = active now). */
+        long    backgroundedAtMillis;
+        /** One-shot: restore the saved scroll offset after the wake reload. */
+        boolean pendingScrollRestore;
 
         TabData(Composite container, RigelBrowser browser, String title, String url) {
             this.container = container;
             this.browser   = browser;
             this.title     = title;
             this.url       = url;
+            this.backgroundedAtMillis = System.currentTimeMillis();
         }
     }
 
@@ -1389,6 +1402,17 @@ public class TabManager {
     private boolean appActive = true;
     private int focusGeneration = 0;
     private long homeRenderVersion = 1;
+    /** Idle background tabs are discarded after this; clamps to >= 1 min.
+     *  0 disables (system property rigel.tabSleepMinutes). */
+    private static final long TAB_SLEEP_AFTER_MILLIS = Math.max(1,
+            Integer.getInteger("rigel.tabSleepMinutes", 15)) * 60_000L;
+    private final java.util.concurrent.ScheduledExecutorService tabSleepSweeper =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "rigel-tab-sleep");
+                t.setDaemon(true);
+                return t;
+            });
+    private volatile boolean shutdown;
     // ── Constructor ──────────────────────────────────────────────────────────
 
     public TabManager(Composite contentArea, BrowserUI.TabDeckLayout stackLayout, BrowserUI ui) {
@@ -1396,6 +1420,10 @@ public class TabManager {
         this.stackLayout = stackLayout;
         this.ui          = ui;
         startGamepadPolling();
+        // Cheap 60s housekeeping tick; all real work happens off-tick in
+        // evaluateAsync callbacks, only for tabs past the idle threshold.
+        tabSleepSweeper.scheduleWithFixedDelay(this::sweepTabSleep,
+                60, 60, java.util.concurrent.TimeUnit.SECONDS);
     }
 
     // ── Reattach after layout toggle ─────────────────────────────────────────
@@ -1419,6 +1447,7 @@ public class TabManager {
             stackLayout.topControl = tabs.get(activeIndex).container;
             tabs.get(activeIndex).container.moveAbove(null);
         }
+        applyDeckVisibility();
         newContentArea.layout(true, true);
     }
 
@@ -1789,9 +1818,23 @@ public class TabManager {
         if (previous != null && previous.browser != null && !previous.browser.isDisposed()) {
             setBackgroundThrottle(previous.browser, true);
         }
+        // Only the active tab's container is visible. A hidden container
+        // sets NSView.hidden on the whole subtree, which makes WebKit
+        // treat the page as hidden: compositing stops, rAF halts, timers
+        // throttle, and WebKit can reclaim decoded frames/tiles. Audio
+        // keeps playing (Safari/Chrome background-tab behavior), so the
+        // old "keep everything visible so media keeps playing" rationale
+        // is preserved for audible pages without burning GPU+RAM per tab.
         stackLayout.topControl = tab.container;
         tab.container.moveAbove(null);
+        applyDeckVisibility();
         contentArea.layout();
+        if (previous != null) previous.backgroundedAtMillis = System.currentTimeMillis();
+        tab.backgroundedAtMillis = 0;
+        // A sleeping tab's page was discarded to reclaim RAM; click = reload
+        // and restore scroll. Must precede the throttle/JS-touching steps
+        // below so they run against the woken document.
+        wakeIfSleeping(tab);
         if (tab.browser != null && !tab.browser.isDisposed()) {
             setBackgroundThrottle(tab.browser, false);
         }
@@ -1803,9 +1846,134 @@ public class TabManager {
         focusBrowserSoon(tab);
     }
 
+    // ── Tab sleep (discard idle background tabs to reclaim RAM) ─────────────
+
+    /**
+     * Audit script result: "scrollX,scrollY,playing,fullscreen". Runs in the
+     * candidate tab just before discard so the decision re-validates the
+     * page's live state (a video that started playing after the sweep's
+     * coarse filter must veto the sleep).
+     * NOTE: evaluateAsync wraps sources in an outer function, so this uses
+     * top-level `return` — an explicit IIFE here would swallow the result.
+     */
+    private static final String TAB_SLEEP_AUDIT_JS =
+              "try {"
+            + "  var playing=false, m=document.querySelectorAll('video,audio');"
+            + "  for (var i=0;i<m.length;i++){var e=m[i];"
+            + "    if(!e.paused && !e.ended && e.readyState>1){playing=true;break}}"
+            + "  return (window.scrollX|0)+','+(window.scrollY|0)+','"
+            + "       + (playing?'1':'0')+','+(document.fullscreenElement?'1':'0');"
+            + "} catch (e) { return '0,0,1,0'; }";
+
+    private void sweepTabSleep() {
+        if (shutdown || TAB_SLEEP_AFTER_MILLIS <= 0) return;
+        Display display = (contentArea == null || contentArea.isDisposed())
+                ? null : contentArea.getDisplay();
+        if (display == null || display.isDisposed()) {
+            // Window is gone; the daemon sweeper must not outlive it.
+            shutdown = true;
+            tabSleepSweeper.shutdownNow();
+            return;
+        }
+        display.asyncExec(() -> {
+            if (shutdown) return;
+            long now = System.currentTimeMillis();
+            for (TabData tab : new ArrayList<>(tabs)) {
+                if (isActive(tab) || tab.sleeping || tab.loading) continue;
+                if (tab.backgroundedAtMillis <= 0) continue;
+                if (now - tab.backgroundedAtMillis < TAB_SLEEP_AFTER_MILLIS) continue;
+                if (tab.browser == null || tab.browser.isDisposed()) continue;
+                if (tab.url == null || tab.url.isBlank()
+                        || "rigel://home".equals(tab.url)
+                        || tab.url.startsWith("about:")) continue;
+                // Never swap a live download's page out from under it.
+                if (ui.hasActiveDownload(tab.browser)) continue;
+                auditAndSleep(tab);
+            }
+        });
+    }
+
+    private void auditAndSleep(TabData tab) {
+        tab.browser.evaluateAsync(TAB_SLEEP_AUDIT_JS, (result, error) -> {
+            if (error != null || result == null || tab.sleeping) return;
+            if (!tabs.contains(tab) || isActive(tab) || tab.loading) return;
+            if (tab.browser.isDisposed()) return;
+            String[] parts = result.toString().split(",");
+            if (parts.length < 4) return;
+            // Playing media / fullscreen wins over the idle heuristic.
+            if ("1".equals(parts[2]) || "1".equals(parts[3])) return;
+            int sx, sy;
+            try {
+                sx = Integer.parseInt(parts[0].trim());
+                sy = Integer.parseInt(parts[1].trim());
+            } catch (NumberFormatException bad) {
+                return;
+            }
+            commitSleep(tab, sx, sy);
+        });
+    }
+
+    /**
+     * Unloads the page to about:blank. This is the real discard: the JS heap,
+     * decoded media, canvases, and layer caches for the page are released by
+     * WebKit (the WebContent process may stay resident but collapses to idle
+     * size). tab.url is intentionally NOT rewritten — the location listener
+     * already ignores about:blank, and the sleeping flags keep the strip
+     * showing the cached title; the URL bar reflects the restored address on
+     * the next activation.
+     */
+    private void commitSleep(TabData tab, int scrollX, int scrollY) {
+        tab.sleepUrl = tab.url;
+        tab.sleepTitle = tab.title;
+        tab.sleepScrollX = scrollX;
+        tab.sleepScrollY = scrollY;
+        tab.sleeping = true;
+        // Replace kills history entries cost-free here because the back/forward
+        // list is a casualty of any discard (same tradeoff as Chrome).
+        safeExecute(tab.browser, "try{location.replace('about:blank')}catch(e){}");
+        ui.onTabsChanged();
+    }
+
+    /** Wake a sleeping tab: reload the saved URL and restore the scroll. */
+    private void wakeIfSleeping(TabData tab) {
+        if (!tab.sleeping) return;
+        tab.sleeping = false;
+        String target = tab.sleepUrl;
+        if (target == null || target.isBlank()) return;
+        tab.pendingScrollRestore = true;
+        // Inject shims into the fresh document, then navigate.
+        injectPageEnhancements(tab.browser);
+        tab.browser.setUrl(target);
+    }
+
+    /** Called from the progress listener when a restored page completes. */
+    private void maybeRestoreScroll(TabData tab) {
+        if (!tab.pendingScrollRestore || tab.browser == null || tab.browser.isDisposed()) return;
+        tab.pendingScrollRestore = false;
+        if (tab.sleepScrollX <= 0 && tab.sleepScrollY <= 0) return;
+        safeExecute(tab.browser, "try{window.scrollTo(" + tab.sleepScrollX + ","
+                + tab.sleepScrollY + ")}catch(e){}");
+    }
+
     private void setBackgroundThrottle(RigelBrowser browser, boolean throttled) {
+
         safeExecute(browser, "if(window.__rigelSetBackgroundTab)window.__rigelSetBackgroundTab("
                 + (throttled ? "true" : "false") + ");");
+    }
+
+    /**
+     * Hides every container except the active tab's. StackLayout itself
+     * only z-orders; without this, every slot in the deck stayed visible,
+     * so WebKit kept all N tabs painting, compositing, and animating at
+     * full rate — the main source of battery/RAM pressure in the deck.
+     */
+    private void applyDeckVisibility() {
+        for (int i = 0; i < tabs.size(); i++) {
+            TabData t = tabs.get(i);
+            if (t.container == null || t.container.isDisposed()) continue;
+            boolean active = i == activeIndex;
+            if (t.container.isVisible() != active) t.container.setVisible(active);
+        }
     }
 
     public void switchTo(TabData tab) {
@@ -2023,13 +2191,17 @@ public class TabManager {
 
                 if (isActive(tab)) ui.onUrlChanged(location);
                 ui.onTitleChanged(tab.title);
-                ui.recordHistory(tab.title, location);
+                // A wake reload would otherwise double-record the visit.
+                if (!tab.pendingScrollRestore) ui.recordHistory(tab.title, location);
 
                 injectPageEnhancements(b);
             }
         });
 
         b.addTitleListener(title -> {
+            // While sleeping, the live document is about:blank — keep the
+            // cached page title so the strip keeps identifying the tab.
+            if (tab.sleeping) return;
             tab.title = title == null || title.isBlank()
                     ? fallbackTitle(tab.url) : title;
             ui.onTitleChanged(tab.title);
@@ -2041,6 +2213,7 @@ public class TabManager {
         b.addProgressListener(new RigelBrowser.ProgressListener() {
             @Override
             public void changed(int current, int total) {
+                if (tab.sleeping) return;   // discard navigation owns the strip
                 boolean stateChanged = !tab.loading;
                 tab.loading = true;
                 tab.progress = total <= 0 ? 12
@@ -2051,6 +2224,7 @@ public class TabManager {
 
             @Override
             public void completed() {
+                if (tab.sleeping) return;
                 boolean stateChanged = tab.loading;
                 tab.loading = false;
                 tab.progress = 0;
@@ -2058,6 +2232,7 @@ public class TabManager {
                 if (isActive(tab)) ui.onLoadProgress(100, 100, true);
                 applyZoom(b);
                 injectPageEnhancements(b);
+                maybeRestoreScroll(tab);
             }
         });
     }
@@ -2711,10 +2886,18 @@ public class TabManager {
                 int nextDelay = 750;
                 if (gameControllerEnabled && appActive) {
                     String json = gameControllerBridge.snapshotJson();
-                    nextDelay = "[]".equals(json) ? 500 : 33;
+                    boolean changed = !json.equals(lastJson);
+                    if ("[]".equals(json)) {
+                        nextDelay = 500;
+                    } else {
+                        // Change-driven cadence: hold 33Hz while inputs are
+                        // moving (gameplay), otherwise a cheap heartbeat —
+                        // a fresh input boosts us back within one heartbeat.
+                        nextDelay = changed ? 33 : 250;
+                    }
                     TabData tab = activeTab();
                     if (tab != null && tab.browser != null && !tab.browser.isDisposed()) {
-                        if (tab.browser != lastBrowser || !json.equals(lastJson)) {
+                        if (tab.browser != lastBrowser || changed) {
                             pushGamepads(tab.browser, json);
                             lastBrowser = tab.browser;
                             lastJson = json;

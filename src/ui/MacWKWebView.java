@@ -58,6 +58,7 @@ final class MacWKWebView extends Composite {
 
     private interface Bridge extends Library {
         int rigel_wk_supported();
+        long rigel_webkit_memory_bytes();
         void rigel_wk_set_proxy_port(int proxyPort);
         void rigel_wk_set_proxy(int proxyPort, int proxyMode);
         void rigel_wk_set_av1_normalization(Pointer handle, int enabled);
@@ -363,6 +364,20 @@ final class MacWKWebView extends Composite {
                 loadFailure = failure;
                 throw new IllegalStateException("Could not load the WKWebView bridge", failure);
             }
+        }
+    }
+
+    /**
+     * Resident bytes across this process's WebContent/Networking/GPU helper
+     * processes, measured in-process via libproc (no /bin/ps spawn). Returns
+     * -1 when unavailable (e.g. the bridge failed to load) so callers can
+     * fall back to the ps-based measurement.
+     */
+    static long webKitMemoryBytes() {
+        try {
+            return bridge().rigel_webkit_memory_bytes();
+        } catch (Throwable unavailable) {
+            return -1;
         }
     }
 

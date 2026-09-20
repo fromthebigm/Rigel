@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <libproc.h>
 
 typedef void (*RigelWKEventCallback)(uint64_t token, int eventType,
                                      const char *value1, const char *value2);
@@ -2321,3 +2322,37 @@ void rigel_field_set_glass(void *viewPtr, int enabled,
 // handling; the page-level hook lives in TabManager's home page behind the
 // same environment flag.)
 
+
+/* Combined resident bytes of this process's WebKit helper children
+ * (WebContent/Networking/GPU). This replaces the old `/bin/ps -A` shell-out
+ * used by the Java memory readout: no process spawn, no text parsing, and we
+ * see only our own helper tree rather than every WebKit process on the box.
+ * proc_pidinfo's pbi_name is truncated to MAXCOMLEN-1 chars, so the filter
+ * matches on the shared "com.apple.Web" prefix instead of the full names.
+ * Returns -1 when nothing was visible (falls back to the ps path). */
+long long rigel_webkit_memory_bytes(void) {
+    int maxCount = proc_listallpids(NULL, 0);
+    if (maxCount <= 0) return -1;
+    pid_t *pids = (pid_t *)calloc((size_t)maxCount, sizeof(pid_t));
+    if (pids == NULL) return -1;
+    int count = proc_listallpids(pids, maxCount * (int)sizeof(pid_t));
+    const uint32_t self = (uint32_t)getpid();
+    unsigned long long total = 0;
+    int found = 0;
+    for (int i = 0; i < count; i++) {
+        pid_t pid = pids[i];
+        if (pid <= 0) continue;
+        struct proc_bsdinfo bsd;
+        if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &bsd, (int)sizeof(bsd))
+                != (int)sizeof(bsd)) continue;
+        if (bsd.pbi_ppid != self) continue;
+        if (strncmp(bsd.pbi_name, "com.apple.Web", 13) != 0) continue;
+        struct proc_taskinfo task;
+        if (proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &task, (int)sizeof(task))
+                != (int)sizeof(task)) continue;
+        total += task.pti_resident_size;
+        found++;
+    }
+    free(pids);
+    return found > 0 ? (long long)total : -1;
+}

@@ -1324,6 +1324,10 @@ public class BrowserUI {
         dragArmedControl = control;
         dragClickConsumed = false;
         dragStartDisplayPoint = control.getDisplay().getCursorLocation();
+        // Unhook any previous registration FIRST: removeTabDragFilters()
+        // intentionally nulls the filter field afterwards, so arming must
+        // (re)create the listener after this call, never before.
+        removeTabDragFilters();
         if (tabDragFilter == null) {
             // Display-level filters keep tracking while the pointer is over
             // other controls or outside the window entirely, which a control
@@ -1333,9 +1337,6 @@ public class BrowserUI {
                 else if (event.type == SWT.MouseUp) finishTabDrag(event);
             };
         }
-        // SWT addFilter does not dedupe: a re-arm while a previous press is
-        // still live would register the same listener twice and leak one.
-        removeTabDragFilters();
         dragFilterDisplay = control.getDisplay();
         dragFilterDisplay.addFilter(SWT.MouseMove, tabDragFilter);
         dragFilterDisplay.addFilter(SWT.MouseUp, tabDragFilter);
@@ -1711,6 +1712,11 @@ public class BrowserUI {
     }
 
     private static long measureWebKitMemoryMb() {
+        // Native libproc path first: no process spawn, no text parsing, and
+        // scoped to our own helper tree (the ps walk counted every WebKit
+        // process on the machine). ps is retained as the fallback only.
+        long nativeBytes = MacWKWebView.webKitMemoryBytes();
+        if (nativeBytes > 0) return nativeBytes / (1024 * 1024);
         try {
             Process probe = new ProcessBuilder("/bin/ps", "-A", "-o", "rss,comm")
                     .redirectErrorStream(true).start();
@@ -1928,7 +1934,8 @@ public class BrowserUI {
             }
 
             gc.setFont(fontTab);
-            gc.setForeground(active ? colTextPrimary : colTextMuted);
+            gc.setForeground(tab.sleeping ? colTextMuted
+                    : active ? colTextPrimary : colTextMuted);
             String raw = tab.title == null || tab.title.isBlank() ? "New Tab" : tab.title;
             String fitted = ellipsize(gc, raw, Math.max(20, size.x - 76 - memoryWidth));
             Point textSize = gc.textExtent(fitted);
@@ -2033,7 +2040,8 @@ public class BrowserUI {
             }
 
             gc.setFont(fontSideTab);
-            gc.setForeground(active ? colTextPrimary : colTextMuted);
+            gc.setForeground(tab.sleeping ? colTextMuted
+                    : active ? colTextPrimary : colTextMuted);
             String raw = tab.title == null || tab.title.isBlank() ? "New Tab" : tab.title;
             String fitted = ellipsize(gc, raw, Math.max(24, size.x - 82));
             Point textSize = gc.textExtent(fitted);
@@ -2200,10 +2208,23 @@ public class BrowserUI {
         if (control == null || control.isDisposed() || tab == null) return;
         String title = tab.title == null || tab.title.isBlank() ? "New Tab" : tab.title;
         setAccessibleName(control, "Tab: " + title);
+        String sleepNote = tab.sleeping ? "\nSleeping — switch here to reload" : "";
         control.setToolTipText(title
                 + ((tab.url == null || tab.url.isBlank()) ? "" : "\n" + tab.url)
+                + sleepNote
                 + "\n" + webKitMemorySummary());
         control.redraw();
+    }
+
+    /** True while the given browser has a live transfer; tab sleep must
+     *  never discard the page underneath an in-flight download. */
+    boolean hasActiveDownload(RigelBrowser browser) {
+        synchronized (downloads) {
+            for (DownloadRecord record : downloads) {
+                if (record.owner == browser && record.isActive()) return true;
+            }
+        }
+        return false;
     }
 
     private void requestActiveTabFocus() {
