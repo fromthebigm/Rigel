@@ -192,6 +192,12 @@ public final class RigelBrowser extends Composite {
     public static void configureProxy(int proxyPort, int proxyMode) {
         int port = Math.max(0, proxyPort);
         int mode = port == 0 ? PROXY_DIRECT : proxyMode;
+        // Diagnostic escape hatch (aitest.sh A/B runs): route WKWebView
+        // directly, bypassing Rigel's loopback proxy chain entirely.
+        if ("1".equals(System.getenv("RIGEL_PROXY_DIRECT"))) {
+            port = 0;
+            mode = PROXY_DIRECT;
+        }
         System.setProperty("rigel.proxy.port", Integer.toString(port));
         System.setProperty("rigel.proxy.mode", Integer.toString(mode));
         String requested = System.getProperty("rigel.browser.backend", "wk").trim();

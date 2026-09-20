@@ -91,6 +91,16 @@ public class History {
                 ? clean : clean.substring(0, clean.offsetByCodePoints(0, maxCodePoints));
     }
 
+    /** Writes go through a single background writer: history is recorded on
+     *  page-load callbacks that run on the SWT event loop, and an unbuffered
+     *  file append there taxes every navigation. */
+    private static final java.util.concurrent.ExecutorService HISTORY_WRITER =
+            java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "rigel-history-writer");
+                t.setDaemon(true);
+                return t;
+            });
+
     public synchronized void record(String title, String url) {
         String u = clean(url, MAX_URL_CODE_POINTS);
         if (u.isEmpty() || u.equals("rigel://home") || u.equals("about:blank")) return;
@@ -103,8 +113,23 @@ public class History {
             entries.subList(0, entries.size() - MAX_ENTRIES).clear();
             trimmed = true;
         }
-        if (trimmed) save();
-        else append(entry);
+        // Snapshot under the lock; the writer iterates off-thread.
+        List<Entry> snapshot = trimmed ? new ArrayList<>(entries) : null;
+        HISTORY_WRITER.execute(() -> {
+            if (snapshot != null) saveAll(snapshot);
+            else append(entry);
+        });
+    }
+
+    private void saveAll(List<Entry> all) {
+        try {
+            List<String> lines = new ArrayList<>(all.size());
+            for (Entry e : all) lines.add(e.time + "\t" + e.title + "\t" + e.url);
+            AtomicFiles.write(file, temporary -> Files.write(temporary, lines,
+                    StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING));
+        } catch (IOException e) {
+            System.err.println("[Rigel] Could not save history: " + e.getMessage());
+        }
     }
 
     private void append(Entry entry) {

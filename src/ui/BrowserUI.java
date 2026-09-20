@@ -394,9 +394,36 @@ public class BrowserUI {
             // Optional: simulate pressing the layout toggle mid-run so the
             // smoke test reproduces the sidebar-button path, then capture.
             boolean toggle = System.getenv("RIGEL_SMOKE_TOGGLE_SIDEBAR") != null;
+            // Optional: navigate to a target page first (real-page smoke).
+            String targetUrl = System.getenv("RIGEL_SMOKE_URL");
+            long settleMs = 5000;
+            try {
+                settleMs = Long.parseLong(
+                        System.getenv().getOrDefault("RIGEL_SMOKE_SETTLE_MS", "5000"));
+            } catch (NumberFormatException ignored) {
+            }
+            int settleInt = (int) Math.min(Integer.MAX_VALUE, settleMs);
+            if (targetUrl != null && !targetUrl.isBlank() && tabManager != null) {
+                tabManager.navigate(targetUrl);
+            }
             if (toggle) display.timerExec(3400, () -> dumpLayoutDebug("before-toggle"));
             if (toggle) display.timerExec(3500, this::toggleLayout);
-            display.timerExec(toggle ? 7000 : 5000, () -> {
+            // Optional: run a JS probe in the settled page and log its JSON.
+            // Lets aitest.sh interrogate real pages (DOM state, injected-
+            // script errors, canvas health) without a debugger attached.
+            String evalFile = System.getenv("RIGEL_SMOKE_EVAL_FILE");
+            if (evalFile != null && !evalFile.isBlank() && tabManager != null) {
+                // A second probe pass runs earlier and may stash async results
+                // on window; the primary file (read at settle) collects them.
+                String evalFileEarly = System.getenv("RIGEL_SMOKE_EVAL_FILE_EARLY");
+                if (evalFileEarly != null && !evalFileEarly.isBlank()) {
+                    int earlyAt = Math.max(3000, settleInt - 8000);
+                    display.timerExec(earlyAt, () -> runSmokeEval(evalFileEarly));
+                }
+                int evalAt = Math.max(1000, settleInt - 2000);
+                display.timerExec(evalAt, () -> runSmokeEval(evalFile));
+            }
+            display.timerExec(toggle ? 7000 : settleInt, () -> {
                 if (tabManager != null) tabManager.snapshotActive(snapshotPath);
                 // Whole-window capture beside the page snapshot: verifies the
                 // chrome glass geometry (drag strip, tab row, sidebar).
@@ -409,6 +436,27 @@ public class BrowserUI {
                 if (toggle) dumpLayoutDebug("after-toggle");
             });
         }
+    }
+
+    /** Smoke-test helper: evaluate a script file in the active page and log. */
+    private void runSmokeEval(String evalFile) {
+        if (tabManager == null) return;
+        String script;
+        try {
+            script = java.nio.file.Files.readString(java.nio.file.Path.of(evalFile));
+        } catch (Exception failure) {
+            System.out.println("[Rigel] smoke-eval: unreadable file " + failure);
+            return;
+        }
+        System.out.println("[Rigel] smoke-eval: running " + evalFile);
+        tabManager.evaluateActive(script, (value, error) -> {
+            if (error != null) {
+                System.out.println("[Rigel] smoke-eval: error " + error.getMessage());
+            } else {
+                System.out.println("[Rigel] smoke-eval: "
+                        + (value == null ? "null" : value.toString()));
+            }
+        });
     }
 
     private void openInitialTabs() {
@@ -598,6 +646,12 @@ public class BrowserUI {
         return glassChrome() && MacVibrancy.isSupported() ? null : opaqueFallback;
     }
 
+    /** Tab-strip surfaces: the deeper chrome tone (so the strip reads as a
+     *  darker band above the lighter nav row, Chrome-style). Null in glass. */
+    private Color chromeDeepWidgetBackground() {
+        return chromeWidgetBackground(colChromeDeep);
+    }
+
     private void paintChromeGradient(GC gc, Point size, Color top, Color bottom,
                                      int glassAlpha, boolean nativeGlassApplied) {
         if (gc == null || gc.isDisposed() || top == null || top.isDisposed()
@@ -696,9 +750,11 @@ public class BrowserUI {
             chromeComposite.moveAbove(contentArea);
         // Gradient background across the full chrome strip. With glass active
         // this is only a light tint; the native material dominates.
+        // Chrome-style elevation: the tab strip sits on the deeper tone and
+        // the nav row on the lighter one; the active tab merges into it.
         chromeComposite.addPaintListener(e -> {
             Point sz = chromeComposite.getSize();
-            paintChromeGradient(e.gc, sz, colNavBg, colChromeDeep,
+            paintChromeGradient(e.gc, sz, colChromeDeep, colNavBg,
                     GLASS_CHROME_TINT_ALPHA, windowGlassApplied);
         });
         GridLayout cl = new GridLayout(1, false);
@@ -712,7 +768,7 @@ public class BrowserUI {
         // gives the address field room to breathe and makes the hierarchy read
         // like a purpose-built browser instead of a crowded utility toolbar.
         Composite tabBand = new Composite(chromeComposite, SWT.NO_BACKGROUND | SWT.DOUBLE_BUFFERED);
-        tabBand.setBackground(chromeWidgetBackground(colNavBg));
+        tabBand.setBackground(chromeDeepWidgetBackground());
         tabBand.setBackgroundMode(SWT.INHERIT_FORCE);
         GridData tabBandData = new GridData(SWT.FILL, SWT.TOP, true, false);
         tabBandData.heightHint = TAB_ROW_HEIGHT;
@@ -725,7 +781,7 @@ public class BrowserUI {
 
         tabScroll = new org.eclipse.swt.custom.ScrolledComposite(
                 tabBand, SWT.H_SCROLL | SWT.NO_BACKGROUND | SWT.DOUBLE_BUFFERED);
-        tabScroll.setBackground(chromeWidgetBackground(colNavBg));
+        tabScroll.setBackground(chromeDeepWidgetBackground());
         tabScroll.setBackgroundMode(SWT.INHERIT_FORCE);
         tabScroll.setExpandHorizontal(false);
         tabScroll.setExpandVertical(false);
@@ -736,7 +792,7 @@ public class BrowserUI {
 
         Composite tabActions = new Composite(
                 tabBand, SWT.NO_BACKGROUND | SWT.DOUBLE_BUFFERED);
-        tabActions.setBackground(chromeWidgetBackground(colNavBg));
+        tabActions.setBackground(chromeDeepWidgetBackground());
         RowLayout actionLayout = new RowLayout(SWT.HORIZONTAL);
         actionLayout.marginLeft = actionLayout.marginRight = 0;
         actionLayout.marginTop = actionLayout.marginBottom = 0;
@@ -746,16 +802,16 @@ public class BrowserUI {
         tabActions.setLayoutData(new GridData(SWT.RIGHT, SWT.CENTER, false, false));
 
         RoundedIconLabel plus = makeIconLabel(
-                tabActions, "plus", "New Tab (Cmd+T)", chromeWidgetBackground(colNavBg));
+                tabActions, "plus", "New Tab (Cmd+T)", chromeDeepWidgetBackground());
         plus.setLayoutData(new RowData(34, 30));
         plus.addMouseListener(clickOn(() -> tabManager.createTab("New Tab", "rigel://home")));
         RoundedIconLabel overview = makeIconLabel(
-                tabActions, "down", "Show all tabs", chromeWidgetBackground(colNavBg));
+                tabActions, "down", "Show all tabs", chromeDeepWidgetBackground());
         overview.setLayoutData(new RowData(30, 30));
         overview.addMouseListener(clickOn(() -> showTabOverview(overview)));
 
         tabStripRow = new Composite(tabScroll, SWT.NO_BACKGROUND | SWT.DOUBLE_BUFFERED);
-        tabStripRow.setBackground(chromeWidgetBackground(colNavBg));
+        tabStripRow.setBackground(chromeDeepWidgetBackground());
         tabStripRow.setBackgroundMode(SWT.INHERIT_FORCE);
 
         RowLayout rl = new RowLayout(SWT.HORIZONTAL);
@@ -995,7 +1051,9 @@ public class BrowserUI {
      * double-clicking it zooms the window, exactly like the real titlebar.
      */
     private void buildGlassDragStrip(Composite parent) {
-        if (!glassChrome() || !MacVibrancy.isSupported()) return;
+        // Built in every mode now: with the unified (full-size-content)
+        // titlebar the traffic lights always overlay this row, glass or not,
+        // so it doubles as their clearance strip and the window-drag surface.
         Composite strip = new Composite(parent, SWT.NO_BACKGROUND | SWT.DOUBLE_BUFFERED);
         strip.setData("rigel.purpose", "window-drag-strip");
         GridData data = new GridData(SWT.FILL, SWT.TOP, true, false);
@@ -1249,6 +1307,15 @@ public class BrowserUI {
     private boolean dragClickConsumed;
     private Listener tabDragFilter;
     private Display dragFilterDisplay;
+    // Chrome-style slide animation: control -> remaining x-offset (px) from
+    // its settled slot. Painted transiently, never affects layout/hit-tests.
+    private final java.util.Map<Control, Integer> tabSlideOffsets = new java.util.IdentityHashMap<>();
+    private long tabSlideAnimStartedNanos;
+    private boolean tabSlideAnimRunning;
+    // Pointer-follow offset for the dragged tab (does not participate in
+    // the slide); recomputed on every drag move event.
+    private int draggedPaintOffsetX;
+    private int dragGrabOffsetX;
 
     /** Call from a tab control's mouseDown; arms (but does not start) a drag. */
     private void armTabDrag(Canvas control, TabManager.TabData tab) {
@@ -1266,6 +1333,9 @@ public class BrowserUI {
                 else if (event.type == SWT.MouseUp) finishTabDrag(event);
             };
         }
+        // SWT addFilter does not dedupe: a re-arm while a previous press is
+        // still live would register the same listener twice and leak one.
+        removeTabDragFilters();
         dragFilterDisplay = control.getDisplay();
         dragFilterDisplay.addFilter(SWT.MouseMove, tabDragFilter);
         dragFilterDisplay.addFilter(SWT.MouseUp, tabDragFilter);
@@ -1285,12 +1355,144 @@ public class BrowserUI {
             tabDragActive = true;
             // Raise the dragged tab, exactly like Chrome does.
             tabManager.switchTo(dragArmedTab);
+            // Where inside the tab the press happened, so the card tracks
+            // the pointer without jumping.
+            try {
+                org.eclipse.swt.graphics.Point origin = dragArmedControl.toDisplay(0, 0);
+                dragGrabOffsetX = here.x - origin.x;
+            } catch (Throwable ignored) {
+                dragGrabOffsetX = 0;
+            }
         }
-        int insertion = computeTabInsertion(here);
-        if (insertion != tabDragInsertion) {
+        // The dragged card follows the pointer directly; its paint offset is
+        // the distance from the slot the live reorder currently grants it.
+        if (!sidebarMode) {
+            try {
+                org.eclipse.swt.graphics.Point stripOrigin = dragArmedControl.getParent().toDisplay(0, 0);
+                org.eclipse.swt.graphics.Point slotOrigin = dragArmedControl.toDisplay(0, 0);
+                int pointerInStrip = here.x - stripOrigin.x;
+                int slotStartInStrip = slotOrigin.x - stripOrigin.x;
+                draggedPaintOffsetX = clamp(pointerInStrip - dragGrabOffsetX
+                        - slotStartInStrip, -slotStartInStrip,
+                        Math.max(0, dragArmedControl.getParent().getSize().x
+                                - slotStartInStrip - dragArmedControl.getSize().x));
+            } catch (Throwable ignored) {
+                draggedPaintOffsetX = 0;
+            }
+            dragArmedControl.redraw();
+        }
+        int insertion = sidebarMode ? computeTabInsertion(here) : computeLiveDropIndex(here);
+        if (sidebarMode && insertion < 0) return;
+        if (insertion != tabDragInsertion && insertion >= 0) {
             tabDragInsertion = insertion;
-            redrawTabStrip();
+            if (sidebarMode) {
+                redrawTabStrip();
+            } else {
+                liveReorderStrip(dragArmedControl, insertion);
+            }
         }
+    }
+
+    /** Current paint offset for a tab mid slide-animation (0 when settled). */
+    private int slideOffsetX(Control control) {
+        Integer offset = tabSlideOffsets.get(control);
+        return offset == null ? 0 : offset;
+    }
+
+    /**
+     * Chrome-style live reorder while dragging: the dragged canvas moves to
+     * its final slot immediately (and the model with it), while displaced
+     * siblings slide into their new slots with a short eased animation.
+     */
+    private void liveReorderStrip(Control dragged, int dropIndex) {
+        if (tabStripRow == null || tabStripRow.isDisposed()) return;
+        Control[] children = tabStripRow.getChildren();
+        int from = -1;
+        int tabCount = 0;
+        for (int i = 0; i < children.length; i++) {
+            if (children[i].isDisposed() || children[i].getData(DATA_TAB_MODEL) == null) continue;
+            if (children[i] == dragged) from = tabCount;
+            tabCount++;
+        }
+        if (from < 0 || tabCount < 2) return;
+        int to = clamp(dropIndex, 0, tabCount - 1);
+        if (to == from) return;
+        // Snapshot positions so each tab can slide from where it was.
+        java.util.Map<Control, Integer> beforeX = new java.util.IdentityHashMap<>();
+        for (Control child : children) beforeX.put(child, child.getBounds().x);
+        // Visual reorder: RowLayout follows child order. Place dragged so
+        // that exactly `to` non-dragged tabs precede it.
+        Control anchor = null;
+        int passed = 0;
+        for (Control child : children) {
+            if (child == dragged || child.isDisposed()
+                    || child.getData(DATA_TAB_MODEL) == null) continue;
+            if (passed == to) { anchor = child; break; }
+            passed++;
+        }
+        if (anchor != null) dragged.moveAbove(anchor);
+        else dragged.moveBelow(null);
+        // Keep the model in the same order; moveTab counts an insertion slot
+        // including the dragged tab itself, so rightward moves shift by one.
+        if (tabManager.getTabs().contains(dragArmedTab)) {
+            tabManager.moveTab(dragArmedTab, to > from ? to + 1 : to);
+        }
+        tabStripRow.layout(true, true);
+        // Re-index for hit tests/marker math elsewhere.
+        Control[] after = tabStripRow.getChildren();
+        for (int i = 0; i < after.length; i++) after[i].setData(DATA_TAB_INDEX, i);
+        // Compute slide distances and animate everyone except the dragged tab
+        // (which is gliding under the pointer already).
+        boolean any = false;
+        for (Control child : after) {
+            Integer oldX = beforeX.get(child);
+            if (oldX == null || child == dragged) continue;
+            int delta = oldX - child.getBounds().x;
+            if (delta != 0) {
+                tabSlideOffsets.put(child, delta);
+                any = true;
+            }
+        }
+        if (any) startTabSlideAnimation();
+        redrawTabStrip();
+    }
+
+    private void startTabSlideAnimation() {
+        if (tabSlideAnimRunning) return;
+        // Snapshot the starting distances; each frame decays them with an
+        // ease-out cubic until every offset reaches zero.
+        java.util.Map<Control, Integer> startOffsets =
+                new java.util.IdentityHashMap<>(tabSlideOffsets);
+        tabSlideAnimRunning = true;
+        tabSlideAnimStartedNanos = System.nanoTime();
+        Display display = shell == null || shell.isDisposed() ? Display.getCurrent() : shell.getDisplay();
+        if (display == null) { tabSlideAnimRunning = false; tabSlideOffsets.clear(); return; }
+        Runnable[] frame = new Runnable[1];
+        frame[0] = () -> {
+            if (display.isDisposed()) return;
+            double t = Math.min(1.0, (System.nanoTime() - tabSlideAnimStartedNanos) / 140_000_000.0);
+            double remaining = Math.pow(1.0 - t, 3.0);   // ease-out decay factor
+            java.util.List<Control> done = new java.util.ArrayList<>();
+            for (java.util.Map.Entry<Control, Integer> entry : startOffsets.entrySet()) {
+                Control control = entry.getKey();
+                if (control == null || control.isDisposed() || t >= 1.0) { done.add(control); continue; }
+                tabSlideOffsets.put(control, (int) Math.round(entry.getValue() * remaining));
+                control.redraw();
+            }
+            for (Control control : done) tabSlideOffsets.remove(control);
+            if (t < 1.0 && tabSlideAnimRunning) {
+                display.timerExec(16, frame[0]);
+            } else {
+                tabSlideOffsets.clear();
+                tabSlideAnimRunning = false;
+                redrawTabStrip();
+            }
+        };
+        display.timerExec(16, frame[0]);
+    }
+
+    private static int clamp(int value, int min, int max) {
+        return Math.max(min, Math.min(max, value));
     }
 
     /** Insertion slot (in model order) for a display point, or -1. */
@@ -1309,6 +1511,27 @@ public class BrowserUI {
             index++;
         }
         return index == 0 ? -1 : index;
+    }
+
+    /**
+     * Final strip index the dragged tab should own for this pointer position:
+     * how many non-dragged tabs sit left of the cursor. This is the ordering
+     * convention Chrome drags use (the dragged tab occupies no gap itself).
+     */
+    private int computeLiveDropIndex(org.eclipse.swt.graphics.Point here) {
+        if (tabStripRow == null || tabStripRow.isDisposed()) return -1;
+        Control[] children = tabStripRow.getChildren();
+        int before = 0;
+        int total = 0;
+        for (Control child : children) {
+            if (child.isDisposed() || child.getData(DATA_TAB_MODEL) == null) continue;
+            if (child == dragArmedControl) continue;
+            total++;
+            org.eclipse.swt.graphics.Rectangle b = child.getBounds();
+            org.eclipse.swt.graphics.Point origin = child.toDisplay(0, 0);
+            if (here.x >= origin.x + b.width / 2) before++;
+        }
+        return total == 0 ? -1 : before;
     }
 
     private boolean isOutsideTabStrip(org.eclipse.swt.graphics.Point here) {
@@ -1333,16 +1556,30 @@ public class BrowserUI {
         dragArmedControl = null;
         tabDragActive = false;
         tabDragInsertion = -1;
+        draggedPaintOffsetX = 0;
+        dragGrabOffsetX = 0;
+        tabSlideOffsets.clear();
         dragClickConsumed = wasActive;   // plain clicks fall through untouched
         redrawTabStrip();
+        // Rebuild before any early return: drags interrupted by non-primary
+        // buttons or a vanished tab still suppressed rebuilds mid-flight.
+        if (wasActive) refreshTabStripAfterDrag();
         if (!wasActive || dragged == null || tabManager == null
                 || !tabManager.getTabs().contains(dragged)) return;
         if (event.button != 1) return;
         if (isOutsideTabStrip(here)) {
             detachTabToNewWindow(dragged, here.x, here.y);
-        } else if (insertion >= 0) {
+        } else if (insertion >= 0 && sidebarMode) {
+            // Top-strip drags already live-reordered the model; the sidebar
+            // keeps the classic drop-time insertion.
             tabManager.moveTab(dragged, insertion);
         }
+    }
+
+    /** Ensure the expensive strip rebuild runs once a drag is fully over. */
+    private void refreshTabStripAfterDrag() {
+        Display display = shell == null || shell.isDisposed() ? null : shell.getDisplay();
+        if (display != null) display.asyncExec(this::refreshTabStrip);
     }
 
     private void cancelTabDrag() {
@@ -1352,7 +1589,14 @@ public class BrowserUI {
         boolean wasActive = tabDragActive;
         tabDragActive = false;
         tabDragInsertion = -1;
+        draggedPaintOffsetX = 0;
+        dragGrabOffsetX = 0;
+        tabSlideOffsets.clear();
         if (wasActive) redrawTabStrip();
+        // Some drag teardowns happen because the tab set changed mid-press
+        // (e.g. Cmd+W closed the dragged tab) while refreshTabStrip was
+        // suppressed — replay the rebuild or the strip shows ghost tabs.
+        if (wasActive) refreshTabStripAfterDrag();
     }
 
     private void removeTabDragFilters() {
@@ -1435,13 +1679,86 @@ public class BrowserUI {
         }
     }
 
+    private volatile long webKitMemoryCachedAt;
+    private volatile long webKitMemoryCachedMb = -1;
+    private static final java.util.concurrent.ExecutorService MEMORY_PROBE =
+            java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "rigel-memory-probe");
+                t.setDaemon(true);
+                return t;
+            });
+
+    /** Combined resident memory of the WebKit helper processes in MB, or -1
+     *  when unknown. WKWebView does not expose per-tab memory; this total
+     *  across WebContent/Networking/GPU is what tab hover shows. The value is
+     *  refreshed on a background thread — a shell-out from the paint path
+     *  would hitch the SWT event loop every cache expiry. */
+    private long webKitMemoryMb() {
+        long now = System.nanoTime();
+        if (now - webKitMemoryCachedAt < 5_000_000_000L) return webKitMemoryCachedMb;
+        webKitMemoryCachedAt = now;  // stamp first so concurrent callers queue once
+        MEMORY_PROBE.execute(() -> {
+            webKitMemoryCachedMb = measureWebKitMemoryMb();
+            // New value: repaint any hovered tab so the label updates live.
+            if (shell != null && !shell.isDisposed()
+                    && !shell.getDisplay().isDisposed()) {
+                shell.getDisplay().asyncExec(() -> {
+                    if (tabStripRow != null && !tabStripRow.isDisposed()) redrawTabStrip();
+                });
+            }
+        });
+        return webKitMemoryCachedMb;
+    }
+
+    private static long measureWebKitMemoryMb() {
+        try {
+            Process probe = new ProcessBuilder("/bin/ps", "-A", "-o", "rss,comm")
+                    .redirectErrorStream(true).start();
+            long totalKb = 0;
+            int count = 0;
+            try (java.io.BufferedReader reader = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(probe.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    String trimmed = line.trim();
+                    if (!trimmed.contains("WebKit")) continue;
+                    int space = trimmed.indexOf(' ');
+                    if (space <= 0) continue;
+                    long rssKb;
+                    try {
+                        rssKb = Long.parseLong(trimmed.substring(0, space).trim());
+                    } catch (NumberFormatException badLine) {
+                        continue;
+                    }
+                    String name = trimmed.substring(space + 1);
+                    if (!name.contains("WebKit.WebContent")
+                            && !name.contains("WebKit.Networking")
+                            && !name.contains("WebKit.GPU")) continue;
+                    totalKb += rssKb;
+                    count++;
+                }
+            }
+            // Do not waitFor() after EOF — the reader already drained the
+            // process, and a wedged ps must never put a thread to sleep here.
+            return count > 0 ? totalKb / 1024 : -1;
+        } catch (Throwable ignored) {
+            return -1;
+        }
+    }
+
+    private String webKitMemorySummary() {
+        long mb = webKitMemoryMb();
+        return mb < 0 ? "WebKit memory: unavailable" : "WebKit memory: " + mb + " MB";
+    }
+
     private void installTabAccessibility(Canvas tabControl, TabManager.TabData tab,
                                          boolean active, boolean vertical) {
         tabControl.setData(DATA_TAB_MODEL, tab);
         String title = tab.title == null || tab.title.isBlank() ? "New Tab" : tab.title;
         setAccessibleName(tabControl, "Tab: " + title);
         tabControl.setToolTipText(title
-                + ((tab.url == null || tab.url.isBlank()) ? "" : "\n" + tab.url));
+                + ((tab.url == null || tab.url.isBlank()) ? "" : "\n" + tab.url)
+                + "\n" + webKitMemorySummary());
         tabControl.getAccessible().addAccessibleControlListener(new AccessibleControlAdapter() {
             @Override public void getRole(AccessibleControlEvent e) {
                 e.detail = ACC.ROLE_TABITEM;
@@ -1529,7 +1846,7 @@ public class BrowserUI {
     private void renderTopBarTab(TabManager.TabData tab, boolean active, int tabWidth) {
         Canvas control = new Canvas(tabStripRow, SWT.NO_BACKGROUND | SWT.DOUBLE_BUFFERED);
         control.setLayoutData(new RowData(tabWidth, TOP_TAB_STRIP_HEIGHT));
-        Color passiveBg = chromeWidgetBackground(colNavBg);
+        Color passiveBg = chromeDeepWidgetBackground();
         boolean[] hover = {false};
         boolean[] closeHot = {false};
 
@@ -1538,53 +1855,106 @@ public class BrowserUI {
             GC gc = e.gc;
             gc.setAntialias(SWT.ON);
             Point size = control.getSize();
+            boolean glass = glassChrome() && windowGlassApplied;
+            boolean dragged = tabDragActive && control == dragArmedControl;
+            int ox = slideOffsetX(control) + (dragged ? draggedPaintOffsetX : 0);
             if (passiveBg != null) {
+                // Clear the slot itself (without the transient offsets) so a
+                // sliding tab never smears over the band behind it.
                 gc.setBackground(passiveBg);
                 gc.fillRectangle(0, 0, size.x, size.y);
             }
             if (active) {
-                gc.setBackground(colTabActive);
-                gc.fillRoundRectangle(1, 1, size.x - 2, size.y - 2, 14, 14);
-                gc.setForeground(colSeparator);
-                gc.drawRoundRectangle(1, 1, size.x - 3, size.y - 3, 14, 14);
-            } else if (hover[0]) {
+                if (glass) {
+                    gc.setBackground(colTabActive);
+                    gc.fillRoundRectangle(ox + 1, 1, size.x - 2, size.y - 2, 14, 14);
+                    gc.setForeground(colSeparator);
+                    gc.drawRoundRectangle(ox + 1, 1, size.x - 3, size.y - 3, 14, 14);
+                } else {
+                    // Chrome: the active tab shares the nav row's tone and is
+                    // rounded only on top, so it reads as one surface with it.
+                    gc.setBackground(colNavBg);
+                    gc.fillRoundRectangle(ox, 3, size.x, size.y - 1, 14, 14);
+                    gc.fillRectangle(ox, size.y - 7, size.x, 7);
+                }
+            } else if (hover[0] && !dragged) {
                 gc.setBackground(colTabHover);
-                gc.fillRoundRectangle(1, 1, size.x - 2, size.y - 2, 14, 14);
+                gc.fillRoundRectangle(ox + 1, 4, size.x - 2, size.y - 6, 10, 10);
+            } else if (!active && !glass) {
+                // Hairline divider between resting inactive tabs, Chrome-style:
+                // only when neither this tab nor its left neighbour wants the
+                // visual weight of a card.
+                Object idx = control.getData(DATA_TAB_INDEX);
+                if (idx instanceof Integer && (Integer) idx > 0) {
+                    gc.setForeground(colSeparator);
+                    gc.drawLine(ox, 9, ox, size.y - 9);
+                }
+            }
+            if (dragged) {
+                gc.setForeground(colTabAccent);
+                gc.setLineWidth(1);
+                gc.drawRoundRectangle(ox + 1, 3, size.x - 3, size.y - 5, 12, 12);
             }
             if (control.isFocusControl()) {
                 gc.setForeground(colTabAccent);
                 gc.setLineWidth(1);
-                gc.drawRoundRectangle(2, 2, size.x - 5, size.y - 5, 12, 12);
+                gc.drawRoundRectangle(ox + 2, 4, size.x - 5, size.y - 8, 12, 12);
             }
             if (tab.loading) {
                 int progressWidth = Math.max(4,
                         (size.x - 16) * Math.max(4, Math.min(96, tab.progress)) / 100);
                 gc.setBackground(colTabAccent);
-                gc.fillRoundRectangle(8, size.y - 3, progressWidth, 2, 2, 2);
+                gc.fillRoundRectangle(ox + 8, size.y - 3, progressWidth, 2, 2, 2);
             }
 
             gc.setFont(fontSectionLabel);
             gc.setForeground(active ? colTextAccent : colTextMuted);
             String mark = tabMark(tab);
             Point markSize = gc.textExtent(mark);
-            gc.drawText(mark, 12, Math.max(0, (size.y - markSize.y) / 2), true);
+            gc.drawText(mark, ox + 12, Math.max(0, (size.y - markSize.y) / 2), true);
+
+            // Hover memory readout (Chrome hovercard-equivalent): painted
+            // into the tab itself so it is impossible to miss, taking width
+            // away from the title only while hovered.
+            String memoryLabel = null;
+            int memoryWidth = 0;
+            if (hover[0] && !dragged) {
+                long mb = webKitMemoryMb();
+                if (mb >= 0) {
+                    memoryLabel = mb + " MB";
+                    gc.setFont(fontSectionLabel);
+                    memoryWidth = gc.textExtent(memoryLabel).x + 8;
+                }
+            }
 
             gc.setFont(fontTab);
             gc.setForeground(active ? colTextPrimary : colTextMuted);
             String raw = tab.title == null || tab.title.isBlank() ? "New Tab" : tab.title;
-            String fitted = ellipsize(gc, raw, Math.max(20, size.x - 76));
+            String fitted = ellipsize(gc, raw, Math.max(20, size.x - 76 - memoryWidth));
             Point textSize = gc.textExtent(fitted);
-            gc.drawText(fitted, 34, Math.max(0, (size.y - textSize.y) / 2), true);
+            gc.drawText(fitted, ox + 34, Math.max(0, (size.y - textSize.y) / 2), true);
+
+            if (memoryLabel != null) {
+                gc.setFont(fontSectionLabel);
+                gc.setForeground(colTextMuted);
+                Point ms = gc.textExtent(memoryLabel);
+                gc.drawText(memoryLabel, ox + size.x - 40 - ms.x,
+                        Math.max(0, (size.y - ms.y) / 2), true);
+            }
 
             if (active || hover[0]) {
                 gc.setForeground(closeHot[0] ? colTextPrimary : colTextMuted);
-                drawCloseGlyph(gc, size.x - 18, size.y / 2);
+                drawCloseGlyph(gc, ox + size.x - 18, size.y / 2);
             }
-            drawInsertionMarker(gc, size, control);
         });
         control.addMouseTrackListener(new MouseTrackAdapter() {
             @Override public void mouseEnter(MouseEvent e) {
                 hover[0] = true;
+                Object model = control.getData(DATA_TAB_MODEL);
+                if (model instanceof TabManager.TabData) {
+                    // Refresh the tooltip so the WebKit memory line is current.
+                    updateTabPresentation(control, (TabManager.TabData) model);
+                }
                 control.redraw();
             }
 
@@ -1678,6 +2048,11 @@ public class BrowserUI {
         control.addMouseTrackListener(new MouseTrackAdapter() {
             @Override public void mouseEnter(MouseEvent e) {
                 hover[0] = true;
+                Object model = control.getData(DATA_TAB_MODEL);
+                if (model instanceof TabManager.TabData) {
+                    // Refresh the tooltip so the WebKit memory line is current.
+                    updateTabPresentation(control, (TabManager.TabData) model);
+                }
                 control.redraw();
             }
 
@@ -1826,7 +2201,8 @@ public class BrowserUI {
         String title = tab.title == null || tab.title.isBlank() ? "New Tab" : tab.title;
         setAccessibleName(control, "Tab: " + title);
         control.setToolTipText(title
-                + ((tab.url == null || tab.url.isBlank()) ? "" : "\n" + tab.url));
+                + ((tab.url == null || tab.url.isBlank()) ? "" : "\n" + tab.url)
+                + "\n" + webKitMemorySummary());
         control.redraw();
     }
 

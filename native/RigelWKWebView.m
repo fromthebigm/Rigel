@@ -183,8 +183,9 @@ static NSString *MediaTraceScript(BOOL normalizeAllSites) {
         "function errorText(e){return e?text(e.name)+(e.message?': '+text(e.message):''):''}"
         "function push(e,relay){try{e.timeMs=Math.round(performance.now());S.events.push(e);if(S.events.length>160)S.events.shift();if(relay&&top!==window)top.postMessage({__rigelMediaTraceEvent:e},'*')}catch(x){}}"
         "addEventListener('message',function(e){var d=e.data;if(window===top&&d&&d.__rigelMediaTraceEvent){var v=d.__rigelMediaTraceEvent;v.frameOrigin=text(e.origin);push(v,false)}},false);"
-        "addEventListener('error',function(e){var t=e.target;if(t&&/^(VIDEO|AUDIO|SOURCE)$/.test(t.tagName||'')){var m=t.error;push({event:'mediaElementError',tag:t.tagName,src:text(t.currentSrc||t.src),code:m&&m.code||0,message:m&&m.message||''},true);return}if(e.message)push({event:'windowError',message:text(e.message),source:text(e.filename),line:e.lineno||0,column:e.colno||0},true)},true);"
+        "addEventListener('error',function(e){var t=e.target;if(t&&/^(VIDEO|AUDIO|SOURCE)$/.test(t.tagName||'')){var m=t.error;push({event:'mediaElementError',tag:t.tagName,src:text(t.currentSrc||t.src),code:m&&m.code||0,message:m&&m.message||''},true);return}if(t&&/^(SCRIPT|LINK)$/.test(t.tagName||'')){push({event:'moduleLoadError',tag:t.tagName,src:text(t.src||t.href),rel:text(t.rel||''),type:text(t.type||'')},true);return}if(e.message)push({event:'windowError',message:text(e.message),source:text(e.filename),line:e.lineno||0,column:e.colno||0},true)},true);"
         "addEventListener('unhandledrejection',function(e){push({event:'unhandledRejection',error:errorText(e.reason)||text(e.reason)},true)},true);"
+        "try{var nativeFetch=window.fetch;if(typeof nativeFetch==='function'){window.fetch=function(){var url='';try{var a0=arguments[0];url=typeof a0==='string'?a0:(a0&&a0.url)||''}catch(e){}return nativeFetch.apply(this,arguments).then(function(r){return r},function(err){push({event:'fetchFailed',url:text(url).slice(0,300),error:errorText(err)||text(err)},true);throw err})}}}catch(e){}"
         "try{"
           "if(typeof MediaSource==='undefined')return;"
           "var mseCompat=!!window.__rigelAv1NormalizeAll||/(^|\\.)anime\\.nexus$/i.test(location.hostname);"
@@ -1856,7 +1857,14 @@ void rigel_wk_destroy(void *handle) {
     dispatch_async(dispatch_get_main_queue(), ^{
         [view removeFromSuperview];
     });
-    CFBridgingRelease(handle);
+    // Defer the release too: the delegate method that reached us through the
+    // JNA trampoline keeps messaging `self` after its emit call (e.g. the
+    // TikTok diagnostics step in webView:didFinishNavigation:), so the
+    // controller must outlive the callback stack, not just the view.
+    void *staleHandle = handle;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        CFBridgingRelease(staleHandle);
+    });
 }
 
 /* Test-only hook: simulates WebKit's termination delegate callback. */
@@ -2035,11 +2043,16 @@ void rigel_wk_evaluate(void *handle, const char *javascript, uint64_t evalToken,
                        RigelWKEvalCallback callback) {
     RigelWKController *controller = Controller(handle);
     if (callback == NULL) return;
-    if (controller == nil || javascript == NULL) {
+    if (controller == nil || controller.webView == nil || javascript == NULL) {
         callback(evalToken, "", "WKWebView is unavailable");
         return;
     }
-    [controller.webView evaluateJavaScript:[NSString stringWithUTF8String:javascript]
+    NSString *source = [NSString stringWithUTF8String:javascript];
+    if (source == nil) {
+        callback(evalToken, "", "script is not valid UTF-8");
+        return;
+    }
+    [controller.webView evaluateJavaScript:source
         completionHandler:^(id result, NSError *error) {
             NSString *value = @"";
             if (result != nil) {
@@ -2105,11 +2118,12 @@ int rigel_window_set_glass(void *windowPtr, int enabled, int material,
 
     if (!enabled) {
         if (effect != nil) [effect removeFromSuperview];
-        if ((window.styleMask & NSWindowStyleMaskFullSizeContentView) != 0) {
-            window.styleMask &= ~(NSUInteger)NSWindowStyleMaskFullSizeContentView;
-        }
-        window.titlebarAppearsTransparent = NO;
-        window.titleVisibility = NSWindowTitleVisible;
+        // Keep the unified Chrome-style header even without vibrancy:
+        // full-size content + transparent hidden titlebar lets the traffic
+        // lights sit on the tab row instead of a separate native band.
+        window.styleMask |= NSWindowStyleMaskFullSizeContentView;
+        window.titlebarAppearsTransparent = YES;
+        window.titleVisibility = NSWindowTitleHidden;
         window.opaque = YES;
         window.backgroundColor = NSColor.windowBackgroundColor;
         [window.contentView setNeedsDisplay:YES];

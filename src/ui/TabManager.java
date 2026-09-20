@@ -2134,6 +2134,7 @@ public class TabManager {
 
     private void injectPageEnhancements(RigelBrowser browser) {
         if (browser.isDisposed()) return;
+        if ("1".equals(System.getenv("RIGEL_DISABLE_PAGE_SHIMS"))) return;
         injectCapabilityProbe(browser);
         injectFullscreenJs(browser);
         injectKeyboardFocusShim(browser);
@@ -2358,6 +2359,9 @@ public class TabManager {
      * positioning polyfill for older system WebKits (see ANCHOR_POLYFILL_JS).
      */
     private static void installDocumentScripts(RigelBrowser browser) {
+        // Diagnostic kill switch for aitest.sh A/B bisection: skip every
+        // page-level shim so failures can be attributed to one script.
+        if ("1".equals(System.getenv("RIGEL_DISABLE_PAGE_SHIMS"))) return;
         installKeyboardFocusDocumentScript(browser);
         browser.addDocumentStartScript(BACKGROUND_THROTTLE_JS);
         browser.addDocumentStartScript(ANCHOR_POLYFILL_JS);
@@ -2438,11 +2442,16 @@ public class TabManager {
         if (held.has(id)) { held.delete(id); return; }
         if (nativeCancelRAF) nativeCancelRAF(id);
     };
+    // HTML5 allows extra arguments (setTimeout(fn, ms, ...args)); dropping
+    // them breaks schedulers that pass state through the timer (chess.com's
+    // board engine, Cloudflare Turnstile, Sentry all do this and crashed).
     window.setTimeout = function (callback, delay) {
-        return nativeSetTimeout(callback, clampDelay(delay));
+        var args = Array.prototype.slice.call(arguments, 2);
+        return nativeSetTimeout.apply(null, [callback, clampDelay(delay)].concat(args));
     };
     window.setInterval = function (callback, delay) {
-        return nativeSetInterval(callback, clampDelay(delay));
+        var args = Array.prototype.slice.call(arguments, 2);
+        return nativeSetInterval.apply(null, [callback, clampDelay(delay)].concat(args));
     };
 
     window.__rigelSetBackgroundTab = function (on) {
@@ -2764,6 +2773,16 @@ public class TabManager {
         TabData tab = activeTab();
         if (tab != null && tab.browser != null && !tab.browser.isDisposed())
             tab.browser.snapshot(path);
+    }
+
+    /** Diagnostic smoke test: evaluate script in the active page. */
+    void evaluateActive(String javascript, java.util.function.BiConsumer<Object, Throwable> completion) {
+        TabData tab = activeTab();
+        if (tab == null || tab.browser == null || tab.browser.isDisposed()) {
+            completion.accept(null, new IllegalStateException("no active browser"));
+            return;
+        }
+        tab.browser.evaluateAsync(javascript, completion);
     }
 
     private boolean isActive(TabData tab) {
