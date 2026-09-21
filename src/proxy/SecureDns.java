@@ -21,8 +21,14 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * DNS resolver for Rigel's proxy stack with optional DNS-over-HTTPS.
@@ -38,6 +44,16 @@ import java.util.concurrent.ThreadLocalRandom;
  * than breaking the page load; the fallback is logged so the degradation is
  * never silent. Results are cached respecting the record TTL so the hot path
  * adds no network round-trip.</p>
+ *
+ * <p>Throughput notes (the regression that shipped between 2026.09.17 and
+ * 2026.09.20 taught these the hard way): media-heavy pages open dozens of
+ * CONNECT tunnels to the same CDN host at the same moment, so this class
+ * <b>must</b> be safe under that fan-out —
+ * one shared in-flight lookup per hostname (single-flight), A/AAAA queried
+ * in parallel instead of serially, cached answers rotated across addresses
+ * so a single congested CDN edge cannot carry every connection for a whole
+ * TTL window, and cache eviction that sheds expired slices instead of
+ * flushing every warm entry at once.</p>
  *
  * <p>LittleProxy consumes this through {@link #asHostResolver()}; the SOCKS5
  * ingress and UDP relay call {@link #resolve(String, int)} directly.</p>
@@ -73,6 +89,10 @@ public final class SecureDns {
     private static final long MAX_TTL_SECONDS = 3600;
     private static final long NEGATIVE_TTL_SECONDS = 60;
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(4);
+    /** Waiter ceiling for a shared in-flight lookup: generously above the
+     *  owner's worst-case (parallel families, both endpoints tried). */
+    private static final long SHARED_LOOKUP_TIMEOUT_MS =
+            REQUEST_TIMEOUT.toMillis() * 2 + 2_000;
 
     /** Resolver IPs only: contacting them needs no preceding DNS lookup. */
     private static final String[] CLOUDFLARE_ENDPOINTS = {
@@ -86,11 +106,44 @@ public final class SecureDns {
             .connectTimeout(REQUEST_TIMEOUT)
             .followRedirects(HttpClient.Redirect.NEVER)
             .build();
-    private static final ConcurrentHashMap<String, CacheEntry> CACHE =
+    // Package-private (not private) so the offline core test can assert
+    // cache and in-flight state directly.
+    static final ConcurrentHashMap<String, CacheEntry> CACHE =
             new ConcurrentHashMap<>();
+    /** One in-flight lookup per hostname: N simultaneous CONNECTs to the same
+     *  host share a single DoH exchange instead of firing N of them. */
+    static final ConcurrentHashMap<String, CompletableFuture<CacheEntry>> IN_FLIGHT =
+            new ConcurrentHashMap<>();    /** Round-robin cursor over cached addresses. */
+    private static final AtomicInteger ROTATION = new AtomicInteger();
+    /**
+     * Offline test seam: when non-null, replaces the real DoH exchange so the
+     * core test can drive fan-out, caching, and rotation deterministically.
+     * Production never sets it. Package-private on purpose.
+     */
+    static volatile FamilyBackend BACKEND_OVERRIDE;
+    /** DoH exchanges run here so A and AAAA go out in parallel. Daemon
+     *  threads: the JVM must never be held open by a lingering lookup. */
+    private static final ExecutorService LOOKUP_POOL = Executors.newCachedThreadPool(r -> {
+        Thread t = new Thread(r, "rigel-doh-lookup");
+        t.setDaemon(true);
+        return t;
+    });
     private static volatile boolean fallbackLogged = false;
 
     private record CacheEntry(List<InetAddress> addresses, long expiresAtNanos) {}
+
+    /**
+     * Network backend seam. Package-private so the offline core test can
+     * exercise single-flight, rotation, and caching deterministically with a
+     * counting stub; production wires the real DoH exchange.
+     */
+    interface FamilyBackend {
+        Response query(int type) throws Exception;
+    }
+
+    /** Decoded answer of one family's exchange. */
+    record Response(List<InetAddress> addresses, long minTtlSeconds,
+                    boolean nxdomain, boolean refused) {}
 
     private SecureDns() {}
 
@@ -99,6 +152,7 @@ public final class SecureDns {
     public static void setMode(Mode next) {
         mode = Objects.requireNonNull(next, "mode");
         CACHE.clear();
+        IN_FLIGHT.clear();
         fallbackLogged = false;
     }
 
@@ -133,21 +187,18 @@ public final class SecureDns {
         Mode active = mode;
         if (active == Mode.SYSTEM) return systemResolve(host, port);
 
-        String key = host.toLowerCase(Locale.ROOT);
-        CacheEntry cached = CACHE.get(key);
+        String key = lowered;
         long now = System.nanoTime();
+        CacheEntry cached = CACHE.get(key);
         if (cached != null) {
             if (now < cached.expiresAtNanos()) {
-                if (cached.addresses().isEmpty()) {
-                    throw new UnknownHostException(host);
-                }
-                return new InetSocketAddress(cached.addresses().get(0), port);
+                return addressFrom(cached, port, host);
             }
             CACHE.remove(key, cached);
         }
 
         try {
-            return dohResolve(active, host, port, key, now);
+            return addressFrom(sharedLookup(active, host, key), port, host);
         } catch (UnknownHostException notFound) {
             // A definitive NXDOMAIN/NODATA over DoH is authoritative; do not
             // second-guess it with a plaintext system lookup.
@@ -158,48 +209,133 @@ public final class SecureDns {
         }
     }
 
+    /**
+     * Single-flight lookup: the first caller for a hostname owns the network
+     * exchange; concurrent callers for the same name await (and share) that
+     * one result. A cache-priming burst of parallel CONNECTs therefore costs
+     * one DoH round-trip, not one per tunnel.
+     */
+    private static CacheEntry sharedLookup(Mode active, String host, String key)
+            throws Exception {
+        CompletableFuture<CacheEntry> mine = new CompletableFuture<>();
+        CompletableFuture<CacheEntry> existing = IN_FLIGHT.putIfAbsent(key, mine);
+        if (existing != null) {
+            return awaitLookup(existing);
+        }
+        try {
+            FamilyBackend backend = BACKEND_OVERRIDE != null
+                    ? BACKEND_OVERRIDE
+                    : type -> exchange(active, host, type);
+            CacheEntry entry = lookupViaBackend(host, backend);
+            putCache(key, entry);
+            mine.complete(entry);
+            return entry;
+        } catch (Throwable failure) {
+            // Transport failures are not negative-cached; the next caller
+            // retries immediately (or falls back via resolve()).
+            mine.completeExceptionally(failure);
+            throw rethrow(failure);
+        } finally {
+            IN_FLIGHT.remove(key, mine);
+        }
+    }
+
+    /** Joins a lookup owned by another thread, preserving exception types. */
+    private static CacheEntry awaitLookup(CompletableFuture<CacheEntry> future)
+            throws Exception {
+        try {
+            return future.get(SHARED_LOOKUP_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        } catch (ExecutionException wrapped) {
+            throw rethrow(wrapped.getCause());
+        } catch (java.util.concurrent.TimeoutException timedOut) {
+            throw new IOException("Shared DoH lookup timed out", timedOut);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted while awaiting DoH lookup", interrupted);
+        }
+    }
+
+    private static Exception rethrow(Throwable failure) throws Exception {
+        if (failure instanceof Exception exception) throw exception;
+        throw new IOException(failure);
+    }
+
+    /**
+     * Core lookup over a (possibly stubbed) backend. A and AAAA are queried
+     * in parallel; one family failing to transport while the other answers
+     * keeps the answers (availability), while both failing falls through to
+     * the system-resolver path in {@link #resolve}.
+     */
+    static CacheEntry lookupViaBackend(String host, FamilyBackend backend) throws Exception {
+        CompletableFuture<Response> a = supplyFamily(backend, TYPE_A);
+        CompletableFuture<Response> aaaa = supplyFamily(backend, TYPE_AAAA);
+        Exception transportFailure = null;
+        List<Response> answered = new ArrayList<>(2);
+        for (CompletableFuture<Response> family : List.of(a, aaaa)) {
+            try {
+                answered.add(family.get(
+                        REQUEST_TIMEOUT.toMillis() + 1_000, TimeUnit.MILLISECONDS));
+            } catch (ExecutionException wrapped) {
+                transportFailure = wrapped.getCause() instanceof Exception cause
+                        ? cause : new IOException(wrapped.getCause());
+            }
+        }
+        if (answered.isEmpty()) {
+            throw transportFailure != null
+                    ? transportFailure : new IOException("No DoH endpoints configured");
+        }
+        for (Response response : answered) {
+            if (response.refused) throw new IOException("DoH server refused the query");
+        }
+        long now = System.nanoTime();
+        for (Response response : answered) {
+            if (response.nxdomain) {
+                // One family reporting NXDOMAIN is definitive for the name.
+                return new CacheEntry(List.of(),
+                        now + NEGATIVE_TTL_SECONDS * 1_000_000_000L);
+            }
+        }
+        List<InetAddress> addresses = new ArrayList<>(4);
+        long minTtl = MAX_TTL_SECONDS;
+        for (Response response : answered) {
+            addresses.addAll(response.addresses());
+            minTtl = Math.min(minTtl, response.minTtlSeconds);
+        }
+        if (addresses.isEmpty()) {
+            if (transportFailure != null) throw transportFailure;
+            return new CacheEntry(List.of(),
+                    now + NEGATIVE_TTL_SECONDS * 1_000_000_000L);
+        }
+        long ttlSeconds = Math.max(MIN_TTL_SECONDS, Math.min(minTtl, MAX_TTL_SECONDS));
+        return new CacheEntry(List.copyOf(addresses),
+                now + ttlSeconds * 1_000_000_000L);
+    }
+
+    private static CompletableFuture<Response> supplyFamily(FamilyBackend backend, int type) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                return backend.query(type);
+            } catch (Exception error) {
+                throw new java.util.concurrent.CompletionException(error);
+            }
+        }, LOOKUP_POOL);
+    }
+
+    /** Picks the next cached address round-robin; negative entries throw. */
+    private static InetSocketAddress addressFrom(CacheEntry entry, int port, String host)
+            throws UnknownHostException {
+        List<InetAddress> addresses = entry.addresses();
+        if (addresses.isEmpty()) throw new UnknownHostException(host);
+        InetAddress pick = addresses.get(
+                Math.floorMod(ROTATION.getAndIncrement(), addresses.size()));
+        return new InetSocketAddress(pick, port);
+    }
+
     /** System resolver path shared by SYSTEM mode and the DoH fallback. */
     private static InetSocketAddress systemResolve(String host, int port)
             throws UnknownHostException {
         return new InetSocketAddress(InetAddress.getByName(host), port);
     }
-
-    private static InetSocketAddress dohResolve(Mode active, String host,
-                                                int port, String cacheKey,
-                                                long nowNanos) throws Exception {
-        // A and AAAA are queried so dual-stack hosts keep working exactly as
-        // they would under the system resolver.
-        List<InetAddress> addresses = new ArrayList<>(4);
-        long minTtl = MAX_TTL_SECONDS;
-        boolean anyAnswer = false;
-        for (int type : new int[] {TYPE_A, TYPE_AAAA}) {
-            Response response = exchange(active, host, type);
-            if (response.refused) {
-                throw new IOException("DoH server refused the query");
-            }
-            if (response.nxdomain) {
-                // One family reporting NXDOMAIN is definitive for the name.
-                cacheNegative(cacheKey, nowNanos);
-                throw new UnknownHostException(host);
-            }
-            if (!response.addresses.isEmpty()) {
-                anyAnswer = true;
-                addresses.addAll(response.addresses);
-                minTtl = Math.min(minTtl, response.minTtlSeconds);
-            }
-        }
-        if (!anyAnswer) {
-            cacheNegative(cacheKey, nowNanos);
-            throw new UnknownHostException(host);
-        }
-        long ttlSeconds = Math.max(MIN_TTL_SECONDS, Math.min(minTtl, MAX_TTL_SECONDS));
-        putCache(cacheKey, new CacheEntry(List.copyOf(addresses),
-                nowNanos + ttlSeconds * 1_000_000_000L));
-        return new InetSocketAddress(addresses.get(0), port);
-    }
-
-    private record Response(List<InetAddress> addresses, long minTtlSeconds,
-                            boolean nxdomain, boolean refused) {}
 
     /** RFC 8484 GET exchange against each endpoint until one succeeds. */
     private static Response exchange(Mode active, String host, int type)
@@ -316,14 +452,24 @@ public final class SecureDns {
         }
     }
 
-    private static void cacheNegative(String key, long nowNanos) {
-        putCache(key, new CacheEntry(List.of(),
-                nowNanos + NEGATIVE_TTL_SECONDS * 1_000_000_000L));
-    }
-
     private static void putCache(String key, CacheEntry entry) {
         if (CACHE.size() >= MAX_CACHE_ENTRIES) {
-            CACHE.clear(); // simplest safe eviction; cache repopulates on demand
+            // Shed expired entries first; only if that is not enough, drop a
+            // slice. Never flush the whole cache: a flush turns every warm
+            // hostname into a simultaneous re-resolve storm (the exact fan-out
+            // this class exists to survive).
+            long now = System.nanoTime();
+            for (var it = CACHE.entrySet().iterator(); it.hasNext(); ) {
+                if (it.next().getValue().expiresAtNanos() <= now) it.remove();
+            }
+            if (CACHE.size() >= MAX_CACHE_ENTRIES) {
+                int toShed = Math.max(1, MAX_CACHE_ENTRIES / 8);
+                var it = CACHE.keySet().iterator();
+                while (it.hasNext() && toShed-- > 0) {
+                    it.next();
+                    it.remove();
+                }
+            }
         }
         CACHE.put(key, entry);
     }
