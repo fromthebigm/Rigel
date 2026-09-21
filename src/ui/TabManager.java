@@ -1291,7 +1291,7 @@ public class TabManager {
     };
 
     var fsObserver = null;
-    var fsDocumentObserver = null;
+    var fsConnectivityPoll = null;
     var fsObserverScheduled = false;
 
     function stopFullscreenObserver() {
@@ -1299,9 +1299,13 @@ public class TabManager {
             try { fsObserver.disconnect(); } catch (e) {}
             fsObserver = null;
         }
-        if (fsDocumentObserver) {
-            try { fsDocumentObserver.disconnect(); } catch (e) {}
-            fsDocumentObserver = null;
+        // The old connectivity watch was a MutationObserver over the whole
+        // document subtree: on chatty fullscreen pages (TikTok lives) that is
+        // a callback per mutation batch just to check one boolean. A poll is
+        // bounded work with identical behaviour.
+        if (fsConnectivityPoll) {
+            try { clearInterval(fsConnectivityPoll); } catch (e) {}
+            fsConnectivityPoll = null;
         }
         fsObserverScheduled = false;
     }
@@ -1319,13 +1323,13 @@ public class TabManager {
                                  (logicalFullscreenElement && logicalFullscreenElement.tagName === 'VIDEO');
                 var desiredVideo = selectFullscreenVideo(fullscreenElement);
                 var needsReapply = fullscreenElement.style.position !== 'fixed' ||
-                                   fullscreenElement.style.width !== '100%' ||
-                                   fullscreenElement.style.height !== '100%' ||
-                                   fullscreenElement.style.overflow !== 'hidden' ||
-                                   desiredVideo !== fullscreenVideo ||
-                                   (needsVideo && (!fullscreenVideo || !fullscreenVideo.isConnected)) ||
-                                   (fullscreenVideo && (fullscreenVideo.style.width !== '100%' ||
-                                                        fullscreenVideo.style.height !== '100%'));
+                                    fullscreenElement.style.width !== '100%' ||
+                                    fullscreenElement.style.height !== '100%' ||
+                                    fullscreenElement.style.overflow !== 'hidden' ||
+                                    desiredVideo !== fullscreenVideo ||
+                                    (needsVideo && (!fullscreenVideo || !fullscreenVideo.isConnected)) ||
+                                    (fullscreenVideo && (fullscreenVideo.style.width !== '100%' ||
+                                                         fullscreenVideo.style.height !== '100%'));
                 if (needsReapply) applyFullscreenStyles(fullscreenElement);
                 if (isYouTube()) hideYouTubeFullscreenArtifacts(fullscreenElement);
             };
@@ -1336,10 +1340,12 @@ public class TabManager {
             attributes: true, childList: true, subtree: true,
             attributeFilter: ['style', 'class']
         });
-        fsDocumentObserver = new MutationObserver(function() {
-            if (fullscreenElement && !fullscreenElement.isConnected) doExit(false);
-        });
-        fsDocumentObserver.observe(document.documentElement, {childList: true, subtree: true});
+        // Detects the fullscreen element being torn out of the DOM (players
+        // that swap containers mid-session). Fixed cost, no per-mutation work.
+        fsConnectivityPoll = setInterval(function() {
+            if (!fullscreenElement || relaxedFullscreenActive) return;
+            if (!fullscreenElement.isConnected) doExit(false);
+        }, 500);
     }
 })();
 """;

@@ -172,10 +172,19 @@ static NSString *LoginDiagnosticsScript(void) {
     "})();";
 }
 
-static NSString *MediaTraceScript(BOOL normalizeAllSites) {
+static NSString *MediaTraceScript(BOOL normalizeAllSites, BOOL fetchDiagnostics) {
     NSString *prefix = normalizeAllSites
         ? @"window.__rigelAv1NormalizeAll=true;"
         : @"window.__rigelAv1NormalizeAll=false;";
+    // The fetch wrapper installs a closure on the hot path of every network
+    // call on every page; fetch-heavy sites (TikTok) pay it per request. It
+    // is diagnostic instrumentation, so it only installs when trace
+    // diagnostics are explicitly enabled (RIGEL_MEDIA_TRACE=1, set by the
+    // diagnostic test runners). Error listeners stay passive and the AV1/MSE
+    // compatibility shim stays always-on — neither costs per-call work.
+    NSString *fetchWrapper = fetchDiagnostics
+        ? @"try{var nativeFetch=window.fetch;if(typeof nativeFetch==='function'){window.fetch=function(){var url='';try{var a0=arguments[0];url=typeof a0==='string'?a0:(a0&&a0.url)||''}catch(e){}return nativeFetch.apply(this,arguments).then(function(r){return r},function(err){push({event:'fetchFailed',url:text(url).slice(0,300),error:errorText(err)||text(err)},true);throw err})}}}catch(e){}"
+        : @"";
     NSString *body = @"(function(){"
         "if(window.__rigelMediaTrace)return;"
         "var S={version:2,startedAt:new Date().toISOString(),frameUrl:location.href,compatibility:{av1LevelNormalization:false,av1AllSites:!!window.__rigelAv1NormalizeAll},events:[]},seen={};"
@@ -186,7 +195,7 @@ static NSString *MediaTraceScript(BOOL normalizeAllSites) {
         "addEventListener('message',function(e){var d=e.data;if(window===top&&d&&d.__rigelMediaTraceEvent){var v=d.__rigelMediaTraceEvent;v.frameOrigin=text(e.origin);push(v,false)}},false);"
         "addEventListener('error',function(e){var t=e.target;if(t&&/^(VIDEO|AUDIO|SOURCE)$/.test(t.tagName||'')){var m=t.error;push({event:'mediaElementError',tag:t.tagName,src:text(t.currentSrc||t.src),code:m&&m.code||0,message:m&&m.message||''},true);return}if(t&&/^(SCRIPT|LINK)$/.test(t.tagName||'')){push({event:'moduleLoadError',tag:t.tagName,src:text(t.src||t.href),rel:text(t.rel||''),type:text(t.type||'')},true);return}if(e.message)push({event:'windowError',message:text(e.message),source:text(e.filename),line:e.lineno||0,column:e.colno||0},true)},true);"
         "addEventListener('unhandledrejection',function(e){push({event:'unhandledRejection',error:errorText(e.reason)||text(e.reason)},true)},true);"
-        "try{var nativeFetch=window.fetch;if(typeof nativeFetch==='function'){window.fetch=function(){var url='';try{var a0=arguments[0];url=typeof a0==='string'?a0:(a0&&a0.url)||''}catch(e){}return nativeFetch.apply(this,arguments).then(function(r){return r},function(err){push({event:'fetchFailed',url:text(url).slice(0,300),error:errorText(err)||text(err)},true);throw err})}}}catch(e){}"
+        "@FETCH_WRAPPER@"
         "try{"
           "if(typeof MediaSource==='undefined')return;"
           "var mseCompat=!!window.__rigelAv1NormalizeAll||/(^|\\.)anime\\.nexus$/i.test(location.hostname);"
@@ -215,6 +224,7 @@ static NSString *MediaTraceScript(BOOL normalizeAllSites) {
           "}"
         "}catch(e){push({event:'traceInstallError',error:errorText(e)},true)}"
     "})();";
+    body = [body stringByReplacingOccurrencesOfString:@"@FETCH_WRAPPER@" withString:fetchWrapper];
     return [prefix stringByAppendingString:body];
 }
 
@@ -1451,7 +1461,8 @@ static void InstallUserScripts(WKUserContentController *controller, BOOL normali
         injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];
     [controller addUserScript:bridge];
     WKUserScript *mediaTrace = [[WKUserScript alloc]
-        initWithSource:MediaTraceScript(normalizeAv1AllSites)
+        initWithSource:MediaTraceScript(normalizeAv1AllSites,
+                                        getenv("RIGEL_MEDIA_TRACE") != NULL)
         injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];
     [controller addUserScript:mediaTrace];
     WKUserScript *tiktokCompatibility = [[WKUserScript alloc]

@@ -10,7 +10,7 @@ trap 'rm -rf "$OUT"' EXIT
 "$JAVA_HOME/bin/javac" -encoding UTF-8 -Xlint:all \
   -cp "$ROOT/build/classes:$ROOT/lib/*" \
   -d "$OUT" "$ROOT/tests/java/RigelWKProxyIntegrationTest.java"
-RIGEL_PROXY_DIAGNOSTICS=1 "$JAVA_HOME/bin/java" \
+RIGEL_PROXY_DIAGNOSTICS=1 RIGEL_MEDIA_TRACE=1 "$JAVA_HOME/bin/java" \
   -XstartOnFirstThread \
   -Drigel.root="$ROOT" \
   -cp "$OUT:$ROOT/build/classes:$ROOT/lib/*" RigelWKProxyIntegrationTest
