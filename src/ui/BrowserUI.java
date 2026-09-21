@@ -231,6 +231,19 @@ public class BrowserUI {
         boolean isActive() { return status.startsWith("Downloading") || "Cancelling".equals(status); }
     }
 
+    /** Keeps the in-memory download history bounded: records otherwise
+     *  accumulate for the whole browser session. Newest entries sit at the
+     *  head, so trimming drops from the tail, never an active transfer. */
+    private static final int MAX_DOWNLOAD_RECORDS = 100;
+
+    private void trimDownloadHistory() {
+        while (downloads.size() > MAX_DOWNLOAD_RECORDS) {
+            DownloadRecord last = downloads.get(downloads.size() - 1);
+            if (last.isActive()) break;   // never drop a live transfer
+            downloads.remove(downloads.size() - 1);
+        }
+    }
+
     // ── Palette (SWT Color objects, allocated from currentTheme) ─────────────
 
     private Color colChromeDeep;
@@ -2615,6 +2628,7 @@ public class BrowserUI {
                 record = new DownloadRecord(id, browser, stringArg(args, 2), stringArg(args, 3),
                         stringArg(args, 4));
                 downloads.add(0, record);
+                trimDownloadHistory();
             }
         }
         if (args.length > 2 && !stringArg(args, 2).isBlank()) record.name = stringArg(args, 2);
@@ -2714,7 +2728,10 @@ public class BrowserUI {
         }
         final String dest = targetPath;
         DownloadRecord record = new DownloadRecord("", null, suggested, url, dest);
-        synchronized (downloads) { downloads.add(0, record); }
+        synchronized (downloads) {
+            downloads.add(0, record);
+            trimDownloadHistory();
+        }
 
         Thread t = new Thread(() -> {
             try {
