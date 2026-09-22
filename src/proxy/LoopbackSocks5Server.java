@@ -114,12 +114,21 @@ public final class LoopbackSocks5Server implements AutoCloseable {
         int consecutiveFailures = 0;
         while (server != null) {
             try {
-                Socket client = server.accept();
+                ServerSocket listener = server;
+                if (listener == null) break;
+                Socket client = listener.accept();
                 consecutiveFailures = 0;
                 clients.add(client);
-                Thread.ofVirtual()
-                        .name("rigel-socks5-client")
-                        .start(() -> handle(client));
+                try {
+                    Thread.ofVirtual()
+                            .name("rigel-socks5-client")
+                            .start(() -> handle(client));
+                } catch (Throwable startFailure) {
+                    // Handler never ran: without this the socket stays in
+                    // `clients` forever, a permanent fd leak.
+                    clients.remove(client);
+                    try { client.close(); } catch (IOException ignored) {}
+                }
             } catch (IOException error) {
                 if (server != null) {
                     consecutiveFailures++;
@@ -227,7 +236,16 @@ public final class LoopbackSocks5Server implements AutoCloseable {
                     .start(() -> copyAndShutdownOutput(littleProxy, client));
             copyAndShutdownOutput(clientInput, littleProxy);
             try {
-                back.join();
+                // Bounded join: a remote that stays silently open after the
+                // client half-closes would otherwise pin both sockets and two
+                // virtual threads indefinitely (OS keepalive takes ~2h).
+                // Closing the littleProxy side forces the back-copy to error
+                // out and exit; the client socket unwinds with it.
+                back.join(30_000);
+                if (back.isAlive()) {
+                    littleProxy.close();
+                    back.join(5_000);
+                }
             } catch (InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
             }
@@ -258,7 +276,15 @@ public final class LoopbackSocks5Server implements AutoCloseable {
 
         UpstreamUdpAssociation upstreamAssociation = null;
         DatagramSocket clientRelay = new DatagramSocket(null);
-        DatagramSocket networkRelay = new DatagramSocket(null);
+        DatagramSocket networkRelay;
+        try {
+            networkRelay = new DatagramSocket(null);
+        } catch (IOException firstLeak) {
+            // The first socket of the pair must not leak when the second
+            // constructor fails under fd exhaustion.
+            clientRelay.close();
+            throw firstLeak;
+        }
         AtomicBoolean active = new AtomicBoolean(true);
         boolean replied = false;
         try {
@@ -281,7 +307,15 @@ public final class LoopbackSocks5Server implements AutoCloseable {
                         + LOOPBACK_V4.getHostAddress() + ":" + clientRelay.getLocalPort()
                         + (upstream == null ? " route=direct" : " route=socks5-upstream"));
             }
-            client.setSoTimeout(0);
+            // Bounded control read: a client that vanished without a FIN
+            // (power cut, interface teardown) would otherwise hold 3 sockets
+            // and 4 virtual threads until OS keepalive reaps it (~2h).
+            // Relay traffic keeps the association alive; five minutes of
+            // total silence means the peer is gone, and a SOCKS client that
+            // revives simply re-associates.
+            client.setSoTimeout(1_000);
+            java.util.concurrent.atomic.AtomicLong lastRelayAt =
+                    new java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis());
             UpstreamUdpAssociation selectedUpstream = upstreamAssociation;
             AtomicReference<InetSocketAddress> clientEndpoint = new AtomicReference<>();
             ConcurrentHashMap<InetSocketAddress, AtomicLong> directDestinations =
@@ -307,17 +341,30 @@ public final class LoopbackSocks5Server implements AutoCloseable {
                     .name("rigel-socks5-udp-out")
                     .start(() -> relayUdpFromClient(clientRelay, networkRelay,
                             client.getInetAddress(), clientEndpoint,
-                            directDestinations, selectedUpstream, active));
+                            directDestinations, selectedUpstream, active, lastRelayAt));
             Thread inbound = Thread.ofVirtual()
                     .name("rigel-socks5-udp-in")
                     .start(() -> relayUdpToClient(clientRelay, networkRelay,
                             clientEndpoint, directDestinations,
-                            selectedUpstream, active));
+                            selectedUpstream, active, lastRelayAt));
 
             try {
-                while (clientInput.read() >= 0) {
-                    // RFC 1928 ties the UDP association lifetime to this TCP
-                    // control connection; additional control bytes are ignored.
+                // The control read now times out once per second; each tick
+                // re-checks the relay clock, so the association cannot
+                // outlive a vanished peer by more than the idle window.
+                outer:
+                while (true) {
+                    try {
+                        if (clientInput.read() < 0) break;
+                    } catch (SocketTimeoutException idleTick) {
+                        if (System.currentTimeMillis() - lastRelayAt.get() > 300_000L) {
+                            if (diagnosticsEnabled()) {
+                                System.err.println("[Rigel proxy diagnostics] SOCKS5 "
+                                        + "UDP association idle-expired");
+                            }
+                            break outer;
+                        }
+                    }
                 }
             } finally {
                 active.set(false);
@@ -359,13 +406,15 @@ public final class LoopbackSocks5Server implements AutoCloseable {
                                     ConcurrentHashMap<InetSocketAddress, AtomicLong>
                                             directDestinations,
                                     UpstreamUdpAssociation upstream,
-                                    AtomicBoolean active) {
+                                    AtomicBoolean active,
+                                    java.util.concurrent.atomic.AtomicLong lastRelayAt) {
         byte[] receiveBuffer = new byte[UDP_BUFFER_SIZE];
         DatagramPacket packet = new DatagramPacket(receiveBuffer, receiveBuffer.length);
         while (active.get() && !clientRelay.isClosed()) {
             try {
                 packet.setLength(receiveBuffer.length);
                 clientRelay.receive(packet);
+                lastRelayAt.set(System.currentTimeMillis());
                 InetSocketAddress source = new InetSocketAddress(
                         packet.getAddress(), packet.getPort());
                 InetSocketAddress knownClient = clientEndpoint.get();
@@ -405,13 +454,15 @@ public final class LoopbackSocks5Server implements AutoCloseable {
                                   ConcurrentHashMap<InetSocketAddress, AtomicLong>
                                           directDestinations,
                                   UpstreamUdpAssociation upstream,
-                                  AtomicBoolean active) {
+                                  AtomicBoolean active,
+                                  java.util.concurrent.atomic.AtomicLong lastRelayAt) {
         byte[] receiveBuffer = new byte[UDP_BUFFER_SIZE];
         DatagramPacket packet = new DatagramPacket(receiveBuffer, receiveBuffer.length);
         while (active.get() && !networkRelay.isClosed()) {
             try {
                 packet.setLength(receiveBuffer.length);
                 networkRelay.receive(packet);
+                lastRelayAt.set(System.currentTimeMillis());
                 InetSocketAddress source = new InetSocketAddress(
                         packet.getAddress(), packet.getPort());
                 InetSocketAddress client = clientEndpoint.get();
@@ -662,9 +713,11 @@ public final class LoopbackSocks5Server implements AutoCloseable {
         }
     }
 
+    private static final boolean DIAGNOSTICS =
+            System.getenv("RIGEL_PROXY_DIAGNOSTICS") != null;
+
     private static boolean diagnosticsEnabled() {
-        String value = System.getenv("RIGEL_PROXY_DIAGNOSTICS");
-        return value != null && (value.equals("1") || value.equalsIgnoreCase("true"));
+        return DIAGNOSTICS;
     }
 
     private record Request(int command, Destination destination) {}
@@ -680,7 +733,14 @@ public final class LoopbackSocks5Server implements AutoCloseable {
             } else if (addressType == 0x03) {
                 int length = readByte(input);
                 if (length < 1) throw new IOException("Empty SOCKS5 domain");
-                host = new String(readExact(input, length), StandardCharsets.ISO_8859_1);
+                String candidate = new String(readExact(input, length), StandardCharsets.ISO_8859_1);
+                // The domain is interpolated into the CONNECT request line
+                // sent to LittleProxy; anything outside RFC 3986 reg-name
+                // (CR/LF especially) would smuggle extra headers.
+                if (!candidate.matches("[A-Za-z0-9._\\-]+")) {
+                    throw new IOException("Invalid SOCKS5 domain");
+                }
+                host = candidate;
             } else if (addressType == 0x04) {
                 rawAddress = readExact(input, 16);
                 host = InetAddress.getByAddress(rawAddress).getHostAddress();

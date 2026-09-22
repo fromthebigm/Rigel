@@ -1410,8 +1410,11 @@ public class TabManager {
     private long homeRenderVersion = 1;
     /** Idle background tabs are discarded after this; clamps to >= 1 min.
      *  0 disables (system property rigel.tabSleepMinutes). */
-    private static final long TAB_SLEEP_AFTER_MILLIS = Math.max(1,
-            Integer.getInteger("rigel.tabSleepMinutes", 15)) * 60_000L;
+    private static final long TAB_SLEEP_AFTER_MILLIS;
+    static {
+        int minutes = Integer.getInteger("rigel.tabSleepMinutes", 15);
+        TAB_SLEEP_AFTER_MILLIS = minutes <= 0 ? 0 : Math.max(1, minutes) * 60_000L;
+    }
     private final java.util.concurrent.ScheduledExecutorService tabSleepSweeper =
             java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
                 Thread t = new Thread(r, "rigel-tab-sleep");
@@ -1903,6 +1906,13 @@ public class TabManager {
         tab.browser.evaluateAsync(TAB_SLEEP_AUDIT_JS, (result, error) -> {
             if (error != null || result == null || tab.sleeping) return;
             if (!tabs.contains(tab) || isActive(tab) || tab.loading) return;
+            if (tab.pendingScrollRestore) return;   // a wake is mid-flight
+            // Re-check idleness: the sweep may have been queued before the
+            // tab was briefly activated, and a just-backgrounded tab deserves
+            // its full idle window again.
+            if (tab.backgroundedAtMillis <= 0
+                    || System.currentTimeMillis() - tab.backgroundedAtMillis
+                            < TAB_SLEEP_AFTER_MILLIS) return;
             if (tab.browser.isDisposed()) return;
             String[] parts = result.toString().split(",");
             if (parts.length < 4) return;

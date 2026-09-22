@@ -59,6 +59,7 @@ public class BrowserUI {
     private static final java.net.http.HttpClient DOWNLOAD_CLIENT =
             java.net.http.HttpClient.newBuilder()
                     .followRedirects(java.net.http.HttpClient.Redirect.NORMAL)
+                    .connectTimeout(java.time.Duration.ofSeconds(20))
                     .build();
 
     // ── Themes ───────────────────────────────────────────────────────────────
@@ -237,10 +238,14 @@ public class BrowserUI {
     private static final int MAX_DOWNLOAD_RECORDS = 100;
 
     private void trimDownloadHistory() {
-        while (downloads.size() > MAX_DOWNLOAD_RECORDS) {
-            DownloadRecord last = downloads.get(downloads.size() - 1);
-            if (last.isActive()) break;   // never drop a live transfer
-            downloads.remove(downloads.size() - 1);
+        // Oldest-first scan from the tail: drop inactive records beyond the
+        // cap. A single stuck-active record must not permanently defeat the
+        // cap (it used to break the loop), so inactive entries beyond it are
+        // still removed; the active one is never dropped.
+        for (int i = downloads.size() - 1; i >= MAX_DOWNLOAD_RECORDS; i--) {
+            DownloadRecord candidate = downloads.get(i);
+            if (candidate.isActive()) continue;   // never drop a live transfer
+            downloads.remove(i);
         }
     }
 
@@ -534,6 +539,30 @@ public class BrowserUI {
         for (Color c : cols) if (c != null && !c.isDisposed()) c.dispose();
     }
 
+    /** Restores a retired color back into its field by palette index —
+     *  the inverse of allocatedColors()'s ordering; used only by the
+     *  applyAppearance failure path. */
+    private void assignColorByIndex(int index, Color color) {
+        switch (index) {
+            case 0 -> colChromeDeep = color;
+            case 1 -> colNavBg = color;
+            case 2 -> colSidebarBg = color;
+            case 3 -> colSidebarDeep = color;
+            case 4 -> colTabActive = color;
+            case 5 -> colTabHover = color;
+            case 6 -> colTabInactive = color;
+            case 7 -> colTabAccent = color;
+            case 8 -> colAddrBg = color;
+            case 9 -> colAddrFg = color;
+            case 10 -> colTextPrimary = color;
+            case 11 -> colTextMuted = color;
+            case 12 -> colTextAccent = color;
+            case 13 -> colSeparator = color;
+            case 14 -> colBtnHover = color;
+            case 15 -> colProxyOn = color;
+        }
+    }
+
     private void disposeColors() {
         disposeColors(allocatedColors());
     }
@@ -645,8 +674,30 @@ public class BrowserUI {
             // Final glass re-apply after all view surgery: the rebuild above can
             // reorder the native effect view over the chrome; this re-pins it.
             applyNativeGlass();
-        } finally {
+            // Retire the old palette only now: a throw above may have left
+            // some widgets painting with the old colors, and disposing them
+            // would convert one transient error into a permanently broken
+            // window (every paint throws).
             disposeColors(retiredColors);
+        } catch (Throwable rebuildFailure) {
+            // Rebuild failed mid-way. The retired palette is what the
+            // un-rebuilt widgets still hold, so restore the field
+            // references to it and dispose the freshly allocated set
+            // instead — then every surviving widget keeps painting
+            // with live colors.
+            Color[] fresh = allocatedColors();
+            Color[] retired = retiredColors;
+            // Undo the field swap: retired[] is ordered identically to the
+            // freshly allocated fields (allocatedColors() order).
+            if (retired.length == fresh.length) {
+                for (int i = 0; i < fresh.length; i++) {
+                    if (retired[i] != null && !retired[i].isDisposed()) {
+                        assignColorByIndex(i, retired[i]);
+                    }
+                }
+            }
+            disposeColors(fresh);
+            throw rebuildFailure;
         }
         MacWindowCaptureProtection.protectSoon(shell);
     }
@@ -1245,6 +1296,11 @@ public class BrowserUI {
             }
             if (chromeComposite  != null && !chromeComposite.isDisposed())  chromeComposite.layout(true, true);
             if (sidebarComposite != null && !sidebarComposite.isDisposed()) sidebarComposite.layout(true, true);
+            if (focusAfter != null && !tabManager.getTabs().contains(focusAfter)) {
+                // The requested tab closed before this rebuild ran; never pin
+                // its TabData (and through it the disposed browser) forever.
+                if (requestedTabFocus == focusAfter) requestedTabFocus = null;
+            }
             if (focusAfter != null && tabManager.getTabs().contains(focusAfter)) {
                 for (Control candidate : tabStripRow.getChildren()) {
                     if (candidate.getData(DATA_TAB_MODEL) == focusAfter) {
@@ -2149,13 +2205,20 @@ public class BrowserUI {
             onActiveTabLoadState(tabManager.isActiveLoading(), tabManager.getActiveProgress());
     }
 
+    private int addressSyncGeneration;
+
     public void onUrlChanged(String url) {
         if (shell == null || shell.isDisposed()) return;
         Display display = shell.getDisplay();
+        int generation = ++addressSyncGeneration;
         display.asyncExec(() -> {
             if (shell == null || shell.isDisposed()) return;
             syncAddressAndNavigation();
-            display.timerExec(90, this::syncAddressAndNavigation);
+            display.timerExec(90, () -> {
+                if (shell == null || shell.isDisposed()
+                        || generation != addressSyncGeneration) return;
+                syncAddressAndNavigation();
+            });
         });
     }
 
@@ -2736,7 +2799,9 @@ public class BrowserUI {
         Thread t = new Thread(() -> {
             try {
                 java.net.http.HttpRequest req = java.net.http.HttpRequest.newBuilder()
-                        .uri(java.net.URI.create(url)).build();
+                        .uri(java.net.URI.create(url))
+                        .timeout(java.time.Duration.ofSeconds(30))
+                        .build();
                 java.nio.file.Path out = java.nio.file.Paths.get(dest);
                 if (out.getParent() != null) java.nio.file.Files.createDirectories(out.getParent());
                 var response = DOWNLOAD_CLIENT.send(

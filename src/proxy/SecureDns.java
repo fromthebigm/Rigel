@@ -92,7 +92,7 @@ public final class SecureDns {
     /** Waiter ceiling for a shared in-flight lookup: generously above the
      *  owner's worst-case (parallel families, both endpoints tried). */
     private static final long SHARED_LOOKUP_TIMEOUT_MS =
-            REQUEST_TIMEOUT.toMillis() * 2 + 2_000;
+            (REQUEST_TIMEOUT.toMillis() + 1_000) * 2 + 3_000;
 
     /** Resolver IPs only: contacting them needs no preceding DNS lookup. */
     private static final String[] CLOUDFLARE_ENDPOINTS = {
@@ -177,6 +177,12 @@ public final class SecureDns {
             throws UnknownHostException {
         InetAddress literal = tryParseLiteral(host);
         if (literal != null) return new InetSocketAddress(literal, port);
+        // A single trailing dot is the legal absolute-FQDN form; without
+        // stripping it, every lookup for such hosts dies in encodeQuery,
+        // falls back to the plaintext resolver (the thing DoH exists to
+        // prevent), and pays a failed DoH round trip each time.
+        if (host.endsWith(".")) host = host.substring(0, host.length() - 1);
+        if (host.isEmpty()) throw new UnknownHostException(host);
         // Loopback names never leave the machine; resolving them over DoH
         // would needlessly fail on offline networks.
         String lowered = host.toLowerCase(Locale.ROOT);
@@ -383,6 +389,13 @@ public final class SecureDns {
             if (bytes.length == 0 || bytes.length > 63) {
                 throw new IOException("Invalid hostname label");
             }
+            // US-ASCII encoding silently mangles non-ASCII into '?', which
+            // would query a DIFFERENT name and NXDOMAIN it. Treat it as a
+            // transport failure so callers fall back to the system resolver,
+            // which can punycode correctly.
+            for (byte b : bytes) {
+                if (b < 0x21 || b > 0x7E) throw new IOException("Non-ASCII hostname label");
+            }
             out.write(bytes.length);
             out.write(bytes);
         }
@@ -404,6 +417,14 @@ public final class SecureDns {
         int rcode = flags & 0x0F;
         if (rcode == 2) throw new IOException("DoH SERVFAIL");
         if (rcode == 5) return new Response(List.of(), 0, false, true);
+        // rcode 0 = NOERROR, 3 = NXDOMAIN handled below, 2 = SERVFAIL and
+        // 5 = REFUSED handled above. Anything else (FORMERR, NOTIMP, …)
+        // means the server could not process the query — a transport
+        // failure to retry with the next endpoint, never an authoritative
+        // empty answer to negative-cache for a minute.
+        if (rcode != 0 && rcode != 3 && rcode != 5) {
+            throw new IOException("DoH rcode " + rcode);
+        }
         int questions = in.readShort();
         int answers = in.readShort();
         in.readShort(); // NSCOUNT
@@ -491,19 +512,47 @@ public final class SecureDns {
                 String bare = host.startsWith("[") && host.endsWith("]")
                         ? host.substring(1, host.length() - 1) : host;
                 if (bare.indexOf(':') < 0) return null;
-                InetAddress[] all = InetAddress.getAllByName(bare);
-                return all.length > 0 && all[0] instanceof Inet6Address
-                        ? all[0] : null;
+                // Only hex digits and colons can be IPv6; anything else must
+                // go through the mode-aware path, not a system lookup.
+                for (int i = 0; i < bare.length(); i++) {
+                    char c = bare.charAt(i);
+                    boolean hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+                            || (c >= 'A' && c <= 'F');
+                    if (!hex && c != ':') return null;
+                }
+                try {
+                    InetAddress[] all = InetAddress.getAllByName(bare);
+                    return all.length > 0 && all[0] instanceof Inet6Address
+                            ? all[0] : null;
+                } catch (Exception bad) {
+                    return null;
+                }
             }
-            boolean numeric = true;
-            for (int i = 0; i < host.length(); i++) {
-                char c = host.charAt(i);
-                if ((c < '0' || c > '9') && c != '.') { numeric = false; break; }
+            // Strict dotted-quad validation: getAllByName falls back to the
+            // SYSTEM resolver for anything numeric-looking but invalid — a
+            // plaintext DNS leak (even with DoH on) plus a multi-second stall.
+            String[] parts = host.split("\\.", -1);
+            if (parts.length != 4) return null;
+            byte[] address = new byte[4];
+            for (int i = 0; i < 4; i++) {
+                String part = parts[i];
+                if (part.isEmpty() || part.length() > 3) return null;
+                int octet;
+                try {
+                    octet = Integer.parseInt(part);
+                } catch (NumberFormatException bad) {
+                    return null;
+                }
+                if (octet < 0 || octet > 255 || (part.length() > 1 && part.charAt(0) == '0')) {
+                    return null;
+                }
+                address[i] = (byte) octet;
             }
-            if (!numeric) return null;
-            InetAddress[] all = InetAddress.getAllByName(host);
-            return all.length > 0 && all[0] instanceof Inet4Address
-                    ? all[0] : null;
+            try {
+                return InetAddress.getByAddress(address);
+            } catch (UnknownHostException impossible) {
+                return null;
+            }
         } catch (Exception ignored) {
             return null;
         }

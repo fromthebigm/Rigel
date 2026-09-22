@@ -155,12 +155,15 @@ public class ProxyServer {
                                             DefaultFullHttpResponse response =
                                                     new DefaultFullHttpResponse(
                                                             HttpVersion.HTTP_1_1, status);
-                                            if (connect) {
-                                                response.headers().set(
-                                                        HttpHeaderNames.CONTENT_LENGTH, 0);
-                                                response.headers().set(HttpHeaderNames.CONNECTION,
-                                                        HttpHeaderValues.CLOSE);
-                                            }
+                                            // Connection: close for BOTH branches: a blocked
+                                            // request may still carry a body (POST beacons);
+                                            // answering early on a keep-alive connection risks
+                                            // the remaining body bytes being parsed as the
+                                            // next request line.
+                                            response.headers().set(
+                                                    HttpHeaderNames.CONTENT_LENGTH, 0);
+                                            response.headers().set(HttpHeaderNames.CONNECTION,
+                                                    HttpHeaderValues.CLOSE);
                                             return response;
                                         }
                                     }
@@ -202,17 +205,24 @@ public class ProxyServer {
 
     // Upstream control
 
-    public synchronized void setUpstream(String host, int port) {
+    public void setUpstream(String host, int port) {
         setUpstream(UpstreamType.HTTP, host, port);
     }
 
-    public synchronized void setUpstream(UpstreamType type, String host, int port) {
+    public void setUpstream(UpstreamType type, String host, int port) {
         String cleanHost = host == null ? "" : host.trim();
         if (type == null || cleanHost.isEmpty() || port < 1 || port > 65535)
             throw new IllegalArgumentException("Invalid upstream proxy address");
+        // Validation and the loopback check run OUTSIDE the monitor: a slow
+        // DoH exchange inside pointsAtLocalListener must never stall
+        // stop()/start()/setUpstream on other threads for seconds.
         if (pointsAtLocalListener(cleanHost, port))
             throw new IllegalArgumentException(
                     "Upstream proxy cannot point to Rigel's own local listener");
+        applyUpstream(type, cleanHost, port);
+    }
+
+    private synchronized void applyUpstream(UpstreamType type, String cleanHost, int port) {
         Upstream next = new Upstream(type, cleanHost, port);
         if (next.equals(upstream)) return;
         upstream = next;
@@ -240,11 +250,21 @@ public class ProxyServer {
             candidate = candidate.substring(1, candidate.length() - 1);
         }
         try {
-            InetSocketAddress resolved = SecureDns.resolve(candidate, 0);
-            InetAddress address = resolved.getAddress();
-            if (address != null
-                    && (address.isLoopbackAddress() || address.isAnyLocalAddress())) {
-                return true;
+            // Note: called from synchronized setUpstream(); a DoH exchange can
+            // block for seconds, so only pay it when the port could possibly
+            // be one of ours.
+            if (candidate.indexOf(':') >= 0 || !candidate.matches("[0-9.]+")) {
+                InetSocketAddress resolved = SecureDns.resolve(candidate, 0);
+                InetAddress address = resolved.getAddress();
+                if (address != null
+                        && (address.isLoopbackAddress() || address.isAnyLocalAddress())) {
+                    return true;
+                }
+            } else {
+                InetAddress address = InetAddress.getByName(candidate);
+                if (address.isLoopbackAddress() || address.isAnyLocalAddress()) {
+                    return true;
+                }
             }
         } catch (Exception ignored) {
             // An unresolved upstream will fail normally when a request uses it.

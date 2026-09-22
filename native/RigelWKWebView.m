@@ -232,7 +232,7 @@ static NSString *TikTokCompatibilityScript(void) {
     return @"(function(){"
         "if(window.__rigelTikTokCompatibility||!/(^|\\.)tiktok\\.com$/i.test(location.hostname))return;"
         "window.__rigelTikTokCompatibility={version:3,heAacV2AudioClock:true,commentRetry:true,stickerFallback:true};"
-        "var active=new WeakMap(),checks=new WeakMap(),audioContext=null,seenMedia={},pendingMedia=[],stickers=[],seenStickerIds={},stickerRenderQueued=false,stickerRoots=[];"
+        "var active=new WeakMap(),checks=new WeakMap(),audioContext=null,seenMedia={},seenMediaCount=0,pendingMedia=[],stickers=[],seenStickerIds={},stickerCount=0,stickerRenderQueued=false,stickerRoots=[];"
         "function u32(b,o){return ((b[o]<<24)|(b[o+1]<<16)|(b[o+2]<<8)|b[o+3])>>>0}"
         "function durationOf(bytes){"
           "for(var i=4;i+40<bytes.length;i++){if(bytes[i]!==109||bytes[i+1]!==118||bytes[i+2]!==104||bytes[i+3]!==100)continue;"
@@ -279,7 +279,7 @@ static NSString *TikTokCompatibilityScript(void) {
         "function inspectMediaResponse(response,url){"
           "url=String(response.url||url||'');if(seenMedia[url])return;"
           "var type=response.headers&&response.headers.get('content-type')||'';"
-          "if(!/video\\/(?:mp4|quicktime)/i.test(type)&&!/\\/video\\/tos\\//i.test(url))return;seenMedia[url]=1;"
+          "if(!/video\\/(?:mp4|quicktime)/i.test(type)&&!/\\/video\\/tos\\//i.test(url))return;if(seenMedia[url])return;if(seenMediaCount>=1500){seenMedia={};seenMediaCount=0}seenMedia[url]=1;seenMediaCount++;"
           "var clone=response.clone(),reader=clone.body&&clone.body.getReader?clone.body.getReader():null;if(!reader)return;"
           "var chunks=[],length=0;function next(){reader.read().then(function(x){"
             "if(x.done||length>=65536){try{reader.cancel()}catch(e){}var bytes=new Uint8Array(length),p=0;for(var i=0;i<chunks.length;i++){bytes.set(chunks[i],p);p+=chunks[i].length}var clockScale=heAacV2ClockScale(bytes);if(clockScale)applyMedia(url,durationOf(bytes),clockScale);return}"
@@ -297,7 +297,7 @@ static NSString *TikTokCompatibilityScript(void) {
         "function ingestComments(value){"
           "if(!value||typeof value!=='object')return;"
           "if(value.cid&&value.cmt_sticker_struct&&!seenStickerIds[value.cid]){"
-            "var url=firstStickerURL(value.cmt_sticker_struct);if(url){seenStickerIds[value.cid]=1;stickers.push({cid:String(value.cid),text:String(value.text||'').trim(),user:String(value.user&&value.user.unique_id||''),nickname:String(value.user&&value.user.nickname||''),url:url});if(stickers.length>300)stickers.shift()}"
+            "var url=firstStickerURL(value.cmt_sticker_struct);if(url){if(stickerCount>=3000){seenStickerIds={};stickerCount=0}seenStickerIds[value.cid]=1;stickerCount++;stickers.push({cid:String(value.cid),text:String(value.text||'').trim(),user:String(value.user&&value.user.unique_id||''),nickname:String(value.user&&value.user.nickname||''),url:url});if(stickers.length>300)stickers.shift()}"
           "}"
           "if(Array.isArray(value)){for(var i=0;i<value.length;i++)ingestComments(value[i]);return}"
           "var keys=Object.keys(value);for(var j=0;j<keys.length;j++){var k=keys[j];if(k==='cmt_sticker_struct'||k==='user'||k==='share_info')continue;if(k==='comments'||k==='reply_comment'||k==='comment'||Array.isArray(value[k]))ingestComments(value[k])}"
@@ -621,6 +621,7 @@ static NSString *TikTokNetworkDiagnosticsScript(void) {
 @property(nonatomic, assign) RigelWKPolicyCallback policyCallback;
 @property(nonatomic, assign) BOOL normalizeAv1AllSites;
 @property(nonatomic, assign) BOOL contentBlockingEnabled;
+@property(nonatomic, assign) BOOL destroyed;
 @property(nonatomic, assign) NSUInteger contentRuleGeneration;
 @property(nonatomic, strong) NSMutableSet<WKWebView *> *pendingPopups;
 @property(nonatomic, strong) NSMapTable<WKWebView *, NSWindow *> *popupWindows;
@@ -792,8 +793,15 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
 }
 
 - (void)closeAllPendingPopups {
+    // Deferred teardown, never synchronous: rigel_wk_destroy can be reached
+    // from inside a WebKit delegate stack, and dropping a popup's last
+    // strong reference there deallocs the popup's WKWebView + NSWindow on
+    // the caller's stack — the exact use-after-free class the deferred
+    // release below exists to prevent. FIFO ordering guarantees these
+    // blocks run before the deferred CFBridgingRelease, so the controller
+    // is still alive when they execute.
     NSArray<WKWebView *> *popups = _pendingPopups.allObjects ?: @[];
-    for (WKWebView *popup in popups) [self closePendingPopup:popup];
+    for (WKWebView *popup in popups) [self closePendingPopupDeferred:popup];
 }
 
 - (WKWebView *)createPopupWebViewWithConfiguration:(WKWebViewConfiguration *)configuration {
@@ -1206,6 +1214,14 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
     }
 
     void (^begin)(NSURL *) = ^(NSURL *destination) {
+        // The tab (or the download) may have been torn down while the save
+        // panel was open: delivering a destination to an already-cancelled
+        // WKDownload violates its API contract and keeps it alive through
+        // this block's strong capture. Fail it instead.
+        if (state.cancelled || _downloads[state.identifier] != state) {
+            completionHandler(nil);
+            return;
+        }
         if (destination == nil) {
             state.cancelled = YES;
             [self completeDownload:download event:@"cancelled" error:@""];
@@ -1644,12 +1660,18 @@ static void ConfigureContentBlocking(RigelWKController *controller, BOOL enabled
         return;
     }
 
+    __weak RigelWKController *weakController = controller;
     [[WKContentRuleListStore defaultStore]
         compileContentRuleListForIdentifier:@"com.rigel.builtin-content-blocker.v1"
         encodedContentRuleList:RigelContentRuleJSON()
         completionHandler:^(WKContentRuleList *ruleList, NSError *error) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (controller.webView == nil || !controller.contentBlockingEnabled ||
+                // Weak capture: the compile completion can land after
+                // rigel_wk_destroy already ran; never extend the controller's
+                // lifetime for a rule list nobody consumes anymore.
+                RigelWKController *controller = weakController;
+                if (controller == nil || controller.webView == nil ||
+                        !controller.contentBlockingEnabled ||
                         controller.contentRuleGeneration != generation) return;
                 if (ruleList == nil) {
                     NSLog(@"[Rigel] Could not compile built-in content rules: %@",
@@ -1832,9 +1854,15 @@ int rigel_wk_cancel_download(void *handle, const char *identifier) {
 }
 
 __attribute__((visibility("default")))
-void rigel_wk_destroy(void *handle) {
+ void rigel_wk_destroy(void *handle) {
     RigelWKController *controller = Controller(handle);
     if (controller == nil) return;
+    // Idempotent: a second destroy with the same handle would enqueue a
+    // second CFBridgingRelease and over-release the controller into a
+    // zombie. The flag lives on the controller itself, so it is visible to
+    // every caller through the same bridge object.
+    if (controller.destroyed) return;
+    controller.destroyed = YES;
     if (controller.loginEventMonitor != nil) {
         [NSEvent removeMonitor:controller.loginEventMonitor];
         controller.loginEventMonitor = nil;

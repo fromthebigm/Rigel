@@ -75,6 +75,8 @@ public class SwitchableProxy implements ChainedProxyManager {
             public javax.net.ssl.SSLEngine newSslEngine() {
                 // ChainedProxyAdapter's default returns null; LittleProxy
                 // dereferences it unconditionally for encrypted upstreams.
+                // Never hand it a null — fail the connection loudly instead
+                // of crashing inside LittleProxy.
                 try {
                     javax.net.ssl.SSLEngine engine = javax.net.ssl.SSLContext.getDefault()
                             .createSSLEngine(upstream.host(), upstream.port());
@@ -87,7 +89,8 @@ public class SwitchableProxy implements ChainedProxyManager {
                     engine.setSSLParameters(params);
                     return engine;
                 } catch (Exception failure) {
-                    return null;
+                    throw new IllegalStateException(
+                            "Could not create an SSL engine for the HTTPS upstream", failure);
                 }
             }
         });
