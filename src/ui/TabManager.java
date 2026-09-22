@@ -1403,6 +1403,11 @@ public class TabManager {
     private final GameControllerBridge gameControllerBridge = SHARED_GAME_CONTROLLER;
     private int activeIndex = -1;
     private boolean gamepadPollingStarted = false;
+    /** True while a runGamepadPoll tick is scheduled; prevents duplicate chains. */
+    private boolean gamepadPollArmed = false;
+    private int gamepadEmptyStreak = 0;
+    private String gamepadLastJson = null;
+    private RigelBrowser gamepadLastBrowser = null;
     private boolean gameControllerEnabled = true;
     private boolean nativeClipboardEnabled = true;
     private boolean appActive = true;
@@ -1431,8 +1436,11 @@ public class TabManager {
         startGamepadPolling();
         // Cheap 60s housekeeping tick; all real work happens off-tick in
         // evaluateAsync callbacks, only for tabs past the idle threshold.
-        tabSleepSweeper.scheduleWithFixedDelay(this::sweepTabSleep,
-                60, 60, java.util.concurrent.TimeUnit.SECONDS);
+        // The step reschedules itself: 60s while any tab still needs
+        // auditing, backing off to 300s once nothing does, so a fully idle
+        // browser stops waking its sweeper thread every minute.
+        tabSleepSweeper.schedule(this::sweepTabSleepStep,
+                60, java.util.concurrent.TimeUnit.SECONDS);
     }
 
     // ── Reattach after layout toggle ─────────────────────────────────────────
@@ -1627,6 +1635,8 @@ public class TabManager {
                 injectGamepadShim(b);
                 pushGamepads(b);
             });
+            // The poll chain parks itself when the bridge is off.
+            postGamepadPoll(250);
         }
     }
 
@@ -1648,6 +1658,9 @@ public class TabManager {
         appActive = active;
         if (!active) focusGeneration++;
         if (active && gameControllerEnabled) {
+            // The poll chain parked itself when Rigel was backgrounded;
+            // wake it back up with the first sample right away.
+            postGamepadPoll(250);
             active().ifPresent(b -> {
                 injectGamepadShim(b);
                 pushGamepads(b);
@@ -1874,7 +1887,7 @@ public class TabManager {
             + "       + (playing?'1':'0')+','+(document.fullscreenElement?'1':'0');"
             + "} catch (e) { return '0,0,1,0'; }";
 
-    private void sweepTabSleep() {
+    private void sweepTabSleepStep() {
         if (shutdown || TAB_SLEEP_AFTER_MILLIS <= 0) return;
         Display display = (contentArea == null || contentArea.isDisposed())
                 ? null : contentArea.getDisplay();
@@ -1887,6 +1900,7 @@ public class TabManager {
         display.asyncExec(() -> {
             if (shutdown) return;
             long now = System.currentTimeMillis();
+            boolean auditedAny = false;
             for (TabData tab : new ArrayList<>(tabs)) {
                 if (isActive(tab) || tab.sleeping || tab.loading) continue;
                 if (tab.backgroundedAtMillis <= 0) continue;
@@ -1898,7 +1912,11 @@ public class TabManager {
                 // Never swap a live download's page out from under it.
                 if (ui.hasActiveDownload(tab.browser)) continue;
                 auditAndSleep(tab);
+                auditedAny = true;
             }
+            if (shutdown || tabSleepSweeper.isShutdown()) return;
+            tabSleepSweeper.schedule(this::sweepTabSleepStep,
+                    auditedAny ? 60 : 300, java.util.concurrent.TimeUnit.SECONDS);
         });
     }
 
@@ -2892,41 +2910,63 @@ public class TabManager {
     private void startGamepadPolling() {
         if (gamepadPollingStarted || contentArea == null || contentArea.isDisposed()) return;
         gamepadPollingStarted = true;
-        Display display = contentArea.getDisplay();
-        Runnable poll = new Runnable() {
-            private String lastJson;
-            private RigelBrowser lastBrowser;
+        postGamepadPoll(250);
+    }
 
-            @Override public void run() {
-                if (contentArea == null || contentArea.isDisposed()) return;
-                int nextDelay = 750;
-                if (gameControllerEnabled && appActive) {
-                    String json = gameControllerBridge.snapshotJson();
-                    boolean changed = !json.equals(lastJson);
-                    if ("[]".equals(json)) {
-                        nextDelay = 500;
-                    } else {
-                        // Change-driven cadence: hold 33Hz while inputs are
-                        // moving (gameplay), otherwise a cheap heartbeat —
-                        // a fresh input boosts us back within one heartbeat.
-                        nextDelay = changed ? 33 : 250;
-                    }
-                    TabData tab = activeTab();
-                    if (tab != null && tab.browser != null && !tab.browser.isDisposed()) {
-                        if (tab.browser != lastBrowser || changed) {
-                            pushGamepads(tab.browser, json);
-                            lastBrowser = tab.browser;
-                            lastJson = json;
-                        }
-                    }
-                } else {
-                    lastBrowser = null;
-                    lastJson = null;
-                }
-                display.timerExec(nextDelay, this);
+    /** Re-arms the poll chain. No-op if a tick is already scheduled, so the
+     *  restart hooks (activation, settings toggle) can call it freely. */
+    private void postGamepadPoll(int delayMs) {
+        if (!gamepadPollingStarted || gamepadPollArmed) return;
+        if (contentArea == null || contentArea.isDisposed()) return;
+        Display display = contentArea.getDisplay();
+        if (display == null || display.isDisposed()) return;
+        gamepadPollArmed = true;
+        display.timerExec(delayMs, this::runGamepadPoll);
+    }
+
+    /**
+     * Battery: the original chain woke the runloop every 750 ms forever —
+     * even backgrounded, even with no controller attached — which alone
+     * blocked App Nap for the whole process. The chain now parks itself
+     * completely whenever Rigel is backgrounded or the bridge is off (the
+     * activation/settings hooks re-arm it), and while a foregrounded Rigel
+     * has no controller attached the heartbeat escalates 1s -> 2s -> 5s
+     * instead of polling at 500 ms forever. A new controller is picked up
+     * within one heartbeat, and gameplay cadence is unchanged.
+     */
+    private void runGamepadPoll() {
+        if (contentArea == null || contentArea.isDisposed()) return;
+        gamepadPollArmed = false;
+        if (gameControllerEnabled && appActive) {
+            String json = gameControllerBridge.snapshotJson();
+            boolean changed = !json.equals(gamepadLastJson);
+            int nextDelay;
+            if ("[]".equals(json)) {
+                gamepadEmptyStreak++;
+                nextDelay = gamepadEmptyStreak >= 3 ? 5000
+                        : gamepadEmptyStreak == 2 ? 2000 : 1000;
+            } else {
+                // Change-driven cadence: hold 33Hz while inputs are
+                // moving (gameplay), otherwise a cheap heartbeat —
+                // a fresh input boosts us back within one heartbeat.
+                gamepadEmptyStreak = 0;
+                nextDelay = changed ? 33 : 250;
             }
-        };
-        display.timerExec(250, poll);
+            TabData tab = activeTab();
+            if (tab != null && tab.browser != null && !tab.browser.isDisposed()) {
+                if (tab.browser != gamepadLastBrowser || changed) {
+                    pushGamepads(tab.browser, json);
+                    gamepadLastBrowser = tab.browser;
+                    gamepadLastJson = json;
+                }
+            }
+            postGamepadPoll(nextDelay);
+        } else {
+            // Parked: zero wakeups while backgrounded or disabled.
+            gamepadLastBrowser = null;
+            gamepadLastJson = null;
+            gamepadEmptyStreak = 0;
+        }
     }
 
     private void safeExecute(RigelBrowser browser, String script) {

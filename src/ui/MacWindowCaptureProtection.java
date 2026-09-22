@@ -7,6 +7,8 @@ import com.sun.jna.Structure;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.ControlAdapter;
 import org.eclipse.swt.events.ControlEvent;
+import org.eclipse.swt.events.ShellAdapter;
+import org.eclipse.swt.events.ShellEvent;
 import org.eclipse.swt.internal.cocoa.NSWindow;
 import org.eclipse.swt.internal.cocoa.OS;
 import org.eclipse.swt.widgets.Display;
@@ -31,9 +33,12 @@ import java.util.concurrent.Executors;
 final class MacWindowCaptureProtection {
     private static final String INSTALLED_KEY = "rigel.captureProtectionInstalled";
     private static final String GENERATION_KEY = "rigel.captureProtectionGeneration";
+    private static final String DISCOVERY_INTERVAL_KEY = "rigel.captureDiscoveryInterval";
+    private static final String DISCOVERY_ARMED_KEY = "rigel.captureDiscoveryArmed";
     private static final long NS_WINDOW_SHARING_NONE = 0L;
     private static final int SETTLE_DELAY_MS = 280;
-    private static final int WINDOW_DISCOVERY_INTERVAL_MS = 1200;
+    private static final int WINDOW_DISCOVERY_MIN_MS = 1200;
+    private static final int WINDOW_DISCOVERY_MAX_MS = 9600;
     private static final int[] NATIVE_FULLSCREEN_RETRY_DELAYS_MS = {
             0, 50, 140, 320, 700, 1300, 2200
     };
@@ -106,11 +111,20 @@ final class MacWindowCaptureProtection {
         shell.setData(INSTALLED_KEY, Boolean.TRUE);
         shell.addControlListener(new ControlAdapter() {
             @Override public void controlResized(ControlEvent event) {
+                resetWindowDiscoveryBaseline(shell);
                 protectSoon(shell);
             }
 
             @Override public void controlMoved(ControlEvent event) {
+                resetWindowDiscoveryBaseline(shell);
                 protectSoon(shell);
+            }
+        });
+        shell.addShellListener(new ShellAdapter() {
+            @Override public void shellActivated(ShellEvent event) {
+                // Coming back to the app is when dialogs and popups are most
+                // likely: sweep immediately and restart the backoff baseline.
+                resetWindowDiscovery(shell);
             }
         });
         protectSoon(shell);
@@ -129,13 +143,44 @@ final class MacWindowCaptureProtection {
         }
     }
 
+    /**
+     * Battery: the discovery loop used to wake every 1200 ms forever —
+     * foreground or background — enumerating every NSApplication window on
+     * the SWT event thread. Together with the gamepad heartbeat that kept
+     * Rigel's runloop hot ~3x/second, blocking App Nap entirely. The sweep
+     * now doubles its interval (1200 -> 9600 ms) while the window set stays
+     * stable and snaps back to 1200 ms the instant a pass finds new windows
+     * or the user interacts with the app (move/resize/activate).
+     */
     private static void scheduleWindowDiscovery(Shell shell, int delayMs) {
         if (!isUsableShell(shell)) return;
+        if (Boolean.TRUE.equals(shell.getData(DISCOVERY_ARMED_KEY))) return;
+        shell.setData(DISCOVERY_ARMED_KEY, Boolean.TRUE);
         shell.getDisplay().timerExec(delayMs, () -> {
             if (!isUsableShell(shell)) return;
-            protectApplicationWindows(shell);
-            scheduleWindowDiscovery(shell, WINDOW_DISCOVERY_INTERVAL_MS);
+            shell.setData(DISCOVERY_ARMED_KEY, Boolean.FALSE);
+            int found = protectApplicationWindows(shell);
+            int next = found > 0 ? WINDOW_DISCOVERY_MIN_MS
+                    : Math.min(discoveryInterval(shell) * 2, WINDOW_DISCOVERY_MAX_MS);
+            shell.setData(DISCOVERY_INTERVAL_KEY, Integer.valueOf(next));
+            scheduleWindowDiscovery(shell, next);
         });
+    }
+
+    private static int discoveryInterval(Shell shell) {
+        Object value = shell.getData(DISCOVERY_INTERVAL_KEY);
+        return value instanceof Integer ? ((Integer) value).intValue() : WINDOW_DISCOVERY_MIN_MS;
+    }
+
+    private static void resetWindowDiscovery(Shell shell) {
+        if (!isUsableShell(shell)) return;
+        shell.setData(DISCOVERY_INTERVAL_KEY, Integer.valueOf(WINDOW_DISCOVERY_MIN_MS));
+        protectApplicationWindows(shell);
+    }
+
+    private static void resetWindowDiscoveryBaseline(Shell shell) {
+        if (!isUsableShell(shell)) return;
+        shell.setData(DISCOVERY_INTERVAL_KEY, Integer.valueOf(WINDOW_DISCOVERY_MIN_MS));
     }
 
     static void protectSoon(Shell shell) {
@@ -168,26 +213,30 @@ final class MacWindowCaptureProtection {
                 && !shell.getDisplay().isDisposed();
     }
 
-    private static void protectNow(Shell shell) {
+    /** @return 1 when a window was newly protected or queued, 0 otherwise. */
+    private static int protectNow(Shell shell) {
         try {
-            if (shell.view == null || shell.view.id == 0) return;
+            if (shell.view == null || shell.view.id == 0) return 0;
             NSWindow window = shell.view.window();
-            if (window == null || window.id == 0) return;
+            if (window == null || window.id == 0) return 0;
             long windowNumber = window.windowNumber();
-            if (windowNumber > 0) protectWindowOnce(window.id, windowNumber);
+            if (windowNumber > 0 && protectWindowOnce(window.id, windowNumber)) return 1;
         } catch (Throwable ignored) {
             // Capture protection is best-effort and must never destabilize SWT.
         }
+        return 0;
     }
 
-    private static void protectApplicationWindows(Shell shell) {
-        if (!isUsableShell(shell)) return;
+    /** @return the number of windows that were newly protected or queued. */
+    private static int protectApplicationWindows(Shell shell) {
+        if (!isUsableShell(shell)) return 0;
+        int found = 0;
         try {
-            protectNow(shell);
+            found += protectNow(shell);
             long application = OS.objc_msgSend(OS.class_NSApplication, OS.sel_sharedApplication);
-            if (application == 0) return;
+            if (application == 0) return found;
             long windows = OS.objc_msgSend(application, OS.sel_registerName("windows"));
-            if (windows == 0) return;
+            if (windows == 0) return found;
             long count = OS.objc_msgSend(windows, OS.sel_registerName("count"));
             long objectAtIndex = OS.sel_registerName("objectAtIndex:");
             long windowNumberSelector = OS.sel_registerName("windowNumber");
@@ -198,7 +247,7 @@ final class MacWindowCaptureProtection {
                 long windowNumber = OS.objc_msgSend(window, windowNumberSelector);
                 if (windowNumber > 0) {
                     liveWindows.put(Long.valueOf(windowNumber), Long.valueOf(window));
-                    protectWindowOnce(window, windowNumber);
+                    if (protectWindowOnce(window, windowNumber)) found++;
                 }
             }
             PROTECTED_WINDOWS.entrySet().removeIf(entry ->
@@ -209,11 +258,12 @@ final class MacWindowCaptureProtection {
             // Native fullscreen can replace a temporary window during this loop;
             // the bounded transition retries will discover its replacement.
         }
+        return found;
     }
 
-    private static void protectWindowOnce(long window, long windowNumber) {
+    private static boolean protectWindowOnce(long window, long windowNumber) {
         Long previous = PROTECTED_WINDOWS.get(Long.valueOf(windowNumber));
-        if (previous != null && previous.longValue() == window) return;
+        if (previous != null && previous.longValue() == window) return false;
 
         // NSWindow access stays on SWT's event thread. This public setting is
         // applied immediately and remains the first line of capture protection.
@@ -227,7 +277,7 @@ final class MacWindowCaptureProtection {
         Long key = Long.valueOf(windowNumber);
         Long pointer = Long.valueOf(window);
         Long pending = PENDING_WINDOWS.put(key, pointer);
-        if (pending != null && pending.longValue() == window) return;
+        if (pending != null && pending.longValue() == window) return false;
 
         CAPTURE_WORKER.execute(() -> {
             boolean completed = applyPrivateProtection(windowNumber);
@@ -236,6 +286,7 @@ final class MacWindowCaptureProtection {
             }
             PENDING_WINDOWS.remove(key, pointer);
         });
+        return true;
     }
 
     /** Runs only on CAPTURE_WORKER; never call this from SWT's event thread. */
