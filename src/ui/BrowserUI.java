@@ -743,10 +743,14 @@ public class BrowserUI {
         boolean enabled = glassChrome() && MacVibrancy.isSupported();
         RigelTheme effectiveTheme = currentTheme.effective();
         boolean darkAppearance = effectiveTheme != RigelTheme.SAND;
-        double tintAlpha = darkAppearance ? 0.34 : 0.18;
+        // Light mode: SAND's deep tone is a warm brown; layered at 18% over
+        // the bright under-window material it reads muddy and cheap. Use a
+        // neutral near-white overlay instead so light glass stays clean.
+        double tintAlpha = darkAppearance ? 0.34 : 0.22;
+        int tintRgb = darkAppearance ? effectiveTheme.chromeDeep : 0xF7F5F8;
         windowGlassApplied = MacVibrancy.applyWindowGlass(shell, enabled,
                 MacVibrancy.MATERIAL_UNDER_WINDOW, tintAlpha,
-                effectiveTheme.chromeDeep, darkAppearance);
+                tintRgb, darkAppearance);
 
         // If Cocoa supports vibrancy but installing the native view fails,
         // force an opaque inherited surface so no control falls back to an

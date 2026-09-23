@@ -24,3 +24,10 @@ hs_err_pid*
 .vscode/
 *.tmp
 *~
+rigel-verify/
+rigel-stage/
+chiaki-audit/
+code-proto/
+zip-verify/
+z*
+*.zip

@@ -103,10 +103,27 @@ final class MacWindowCaptureProtection {
         return "1".equals(value) || "true".equalsIgnoreCase(value);
     }
 
+    /** True when captures should pass through: BigM's per-launcher toggle
+     *  (BIGM_CAPTURE_PROTECTION=0) or the dev diagnostic flag. Anything
+     *  launched standalone keeps the protected default. */
+    private static boolean captureRelaxed() {
+        return diagnosticCaptureEnabled() || protectionDisabledByLauncher();
+    }
+
+    /** BigM's per-launcher Screenshot Protection toggle arrives as
+     *  BIGM_CAPTURE_PROTECTION=0; anything launched standalone keeps the
+     *  protected default. */
+    private static boolean protectionDisabledByLauncher() {
+        String value = System.getenv("BIGM_CAPTURE_PROTECTION");
+        if (value == null) return false;
+        value = value.trim();
+        return value.equals("0") || value.equalsIgnoreCase("off") || value.equalsIgnoreCase("false");
+    }
+
     static void install(Shell shell) {
         // Normal Rigel keeps its capture exclusion. aitest.sh opts a
         // diagnostic process out so screenshots and recordings can inspect it.
-        if (diagnosticCaptureEnabled()) return;
+        if (captureRelaxed()) return;
         if (!isUsableShell(shell) || Boolean.TRUE.equals(shell.getData(INSTALLED_KEY))) return;
         shell.setData(INSTALLED_KEY, Boolean.TRUE);
         shell.addControlListener(new ControlAdapter() {
@@ -133,7 +150,7 @@ final class MacWindowCaptureProtection {
 
     /** Called immediately before a website is allowed to enter native fullscreen. */
     static void prepareNativeFullscreen(Shell shell) {
-        if (diagnosticCaptureEnabled()) return;
+        if (captureRelaxed()) return;
         if (!isUsableShell(shell)) return;
         Display display = shell.getDisplay();
         for (int delay : NATIVE_FULLSCREEN_RETRY_DELAYS_MS) {
