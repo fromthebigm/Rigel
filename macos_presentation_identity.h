@@ -23,6 +23,7 @@
 #import <AppKit/AppKit.h>
 #import <Foundation/Foundation.h>
 #include <objc/runtime.h>
+#include <dlfcn.h>
 
 static NSString* presentationMenuName;
 static NSString* presentationNativeName;
@@ -86,12 +87,27 @@ static NSString* presentation_file_path(const char* utf8) {
     return [[NSFileManager defaultManager] isReadableFileAtPath:path] ? path : nil;
 }
 
+static NSDictionary<NSString*, NSString*>* presentationIconPresets;
+
 static void presentation_load_icon_environment(void) {
     if (presentationIconEnvironmentLoaded) return;
     presentationIconEnvironmentLoaded = YES;
-    presentationIconLightPath = presentation_file_path(getenv("BIGM_PRESENTATION_ICON_LIGHT"));
-    presentationIconDarkPath  = presentation_file_path(getenv("BIGM_PRESENTATION_ICON_DARK"));
+    NSString* light = presentation_file_path(getenv("BIGM_PRESENTATION_ICON_LIGHT"));
+    NSString* dark  = presentation_file_path(getenv("BIGM_PRESENTATION_ICON_DARK"));
     const char* mode = getenv("BIGM_PRESENTATION_ICON_MODE");
+
+    if ((light.length == 0 && dark.length == 0) && presentationIconPresets) {
+        light = presentationIconPresets[@"light"];
+        dark = presentationIconPresets[@"dark"];
+        NSString* presetMode = presentationIconPresets[@"mode"];
+        if (presetMode.length) {
+            presetMode = [[presetMode lowercaseString]
+                stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        } else {
+            presetMode = @"system";
+        }
+        if (!mode || !*mode) mode = presetMode.UTF8String;
+    }
     if (mode && *mode) {
         NSString* value = [[[NSString stringWithUTF8String:mode] lowercaseString]
                                stringByTrimmingCharactersInSet:
@@ -187,11 +203,77 @@ static void presentation_override_bundle(NSBundle* bundle) {
     [info setObject:presentationNativeName forKey:@"CFBundleDisplayName"];
 }
 
+// Copies game-mode identity keys from the target bundle into the host
+// process's main bundle (python-hosted ports inherit the covered app's
+// Game Mode entitlement answers). No-op unless a target bundle was given.
+static void presentation_copy_game_mode_identity(NSBundle* source, NSBundle* destination) {
+    if (!source || !destination || source == destination) return;
+    NSDictionary* sourceInfo = [source infoDictionary];
+    NSMutableDictionary* destinationInfo = (NSMutableDictionary*)[destination infoDictionary];
+    for (NSString* key in @[
+        @"GCSupportsGameMode",
+        @"LSSupportsGameMode",
+        @"LSApplicationCategoryType"
+    ]) {
+        id value = [sourceInfo objectForKey:key];
+        if (value) [destinationInfo setObject:value forKey:key];
+    }
+}
+
 // Appearance-change refresh without KVO: observing NSApp.effectiveAppearance
 // would synthesize an NSKVONotifying_ subclass that breaks Rust-based apps
 // (GPUI probes NSApplication's ivars and panics on the dynamic subclass).
 // Instead we re-apply on activation and main-window changes — Dock icon
 // follows a system light/dark flip at the next interaction.
+static void presentation_install(
+    NSString* targetBundlePath,
+    NSString* nativeName,
+    NSString* menuName,
+    NSString* iconPath
+);
+
+// The preset variant of install: an adaptive pair shipped with the portable
+// build so the default icon still tracks light/dark even when BigM is
+// absent. Environment variables (set by BigM for a user-picked icon) always
+// win over the presets below.
+static __attribute__((unused)) void presentation_install_adaptive(
+    NSString* targetBundlePath,
+    NSString* nativeName,
+    NSString* menuName,
+    NSString* lightIconPath,
+    NSString* darkIconPath,
+    NSString* mode
+) {
+    presentationIconPresets = [@{
+        @"light": lightIconPath ?: @"",
+        @"dark": darkIconPath ?: @"",
+        @"mode": mode ?: @"system",
+    } copy];
+    presentation_install(targetBundlePath, nativeName, menuName, lightIconPath);
+}
+
+
+// Loaders don't pass file paths by hand; their preset pair sits beside the
+// loader dylib inside the portable package (<preset>-light.png / -dark.png).
+static __attribute__((unused)) void presentation_install_preset(
+    NSString* targetBundlePath,
+    NSString* nativeName,
+    NSString* menuName,
+    NSString* presetName
+) {
+    NSString* dir = nil;
+    Dl_info info;
+    if (dladdr((void*)&presentation_install_preset, &info) && info.dli_fname) {
+        dir = [[NSString stringWithUTF8String:info.dli_fname]
+               stringByDeletingLastPathComponent];
+    }
+    NSString* light = [dir stringByAppendingPathComponent:
+        [presetName stringByAppendingString:@"-light.png"]];
+    NSString* dark = [dir stringByAppendingPathComponent:
+        [presetName stringByAppendingString:@"-dark.png"]];
+    presentation_install_adaptive(targetBundlePath, nativeName, menuName, light, dark, @"system");
+}
+
 static void presentation_install(
     NSString* targetBundlePath,
     NSString* nativeName,
@@ -204,9 +286,12 @@ static void presentation_install(
         presentationMenuName = [menuName copy];
         presentationIconPath = [iconPath copy];
 
-        presentation_override_bundle([NSBundle mainBundle]);
+        NSBundle* mainBundle = [NSBundle mainBundle];
+        presentation_override_bundle(mainBundle);
         if (targetBundlePath.length > 0) {
-            presentation_override_bundle([NSBundle bundleWithPath:targetBundlePath]);
+            NSBundle* targetBundle = [NSBundle bundleWithPath:targetBundlePath];
+            presentation_override_bundle(targetBundle);
+            presentation_copy_game_mode_identity(targetBundle, mainBundle);
         }
 
         Method menuTitle = class_getInstanceMethod([NSMenu class], @selector(setTitle:));
