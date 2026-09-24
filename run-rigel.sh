@@ -21,15 +21,11 @@ if [[ -d "$DIR/jdk/Contents/Home" ]]; then
 fi
 xattr -dr com.apple.quarantine "$DIR" 2>/dev/null || true
 
-# Stable process identity: WebKit keys ALL persistent website data (sign-ins,
-# cookies, storage) on the process bundle identifier, historically
-# com.rigel.weather-host -> ~/Library/WebKit/com.rigel.weather-host. Simply
-# unsetting the variable left the java process with a JDK-derived identity
-# that changes with whatever java binary runs (system Zulu vs OpenJDK vs
-# bundled), silently "forgetting" every account on each change. Exporting the
-# original identity pins the store for good AND still fixes the inherited
-# Terminal identity: LaunchServices registers Rigel as its own app either way.
-export __CFBundleIdentifier=com.rigel.weather-host
+# Terminal exports its own bundle identity to child processes. If Java inherits
+# it, LaunchServices can keep treating Rigel as part of Terminal: Terminal stays
+# active in the menu bar and the otherwise-visible Rigel window may not receive
+# mouse events. Let macOS register Java/Rigel as its own GUI process instead.
+unset __CFBundleIdentifier
 
 # Normal launches must keep Rigel's window capture protection enabled even if
 # the calling shell previously exported the diagnostic flag. aitest.sh opts in
