@@ -2361,6 +2361,89 @@ void rigel_field_set_glass(void *viewPtr, int enabled,
 // handling; the page-level hook lives in TabManager's home page behind the
 // same environment flag.)
 
+/* Explicit cookie persistence. WebKit's own HTTPStorages jar is only flushed
+ * when the network process exits cleanly, but this host exits the JVM the
+ * moment the last window closes — the helper is torn down before any flush
+ * runs, so on-disk cookies stay frozen forever (site sessions appear to
+ * "not save"). Fix: the app snapshots WKHTTPCookieStore to a plist beside
+ * the profile (Support/cookies.store) at session-end and replays it into
+ * the default data store on the next launch before any web view loads.
+ * Cookie entries carry only NSHTTPCookieProperty keys; expires dates and
+ * httpOnly/secure flags round-trip through NSDictionary serialization. */
+
+/* Async WKHTTPCookieStore round-trip; completions land on the main queue, so
+ * a caller ON the main thread must pump the runloop while waiting, other
+ * threads just wait.
+ */
+static NSArray<NSHTTPCookie *> *RigelCookieStoreFetchAll(void) {
+    __block NSArray<NSHTTPCookie *> *cookies = nil;
+    __block BOOL finished = NO;
+    dispatch_semaphore_t gate = dispatch_semaphore_create(0);
+    dispatch_block_t fetch = ^{
+        [WKWebsiteDataStore.defaultDataStore.httpCookieStore
+            getAllCookies:^(NSArray<NSHTTPCookie *> *found) {
+                cookies = found;
+                finished = YES;
+                dispatch_semaphore_signal(gate);
+            }];
+    };
+    CFAbsoluteTime deadline = CFAbsoluteTimeGetCurrent() + 10;
+    if ([NSThread isMainThread]) {
+        fetch();
+        while (!finished && CFAbsoluteTimeGetCurrent() < deadline) {
+            [[NSRunLoop mainRunLoop] runMode:NSDefaultRunLoopMode
+                                  beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+        }
+    } else {
+        dispatch_async(dispatch_get_main_queue(), fetch);
+        long wait = dispatch_semaphore_wait(gate,
+                dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)));
+        if (wait != 0) finished = NO;
+    }
+    return finished ? cookies : nil;
+}
+
+__attribute__((visibility("default")))
+int rigel_wk_cookies_save(const char *path) {
+    if (path == NULL) return 0;
+    NSArray<NSHTTPCookie *> *cookies = RigelCookieStoreFetchAll();
+    if (cookies == nil) return 0;
+    NSMutableArray<NSDictionary *> *entries =
+        [NSMutableArray arrayWithCapacity:cookies.count];
+    for (NSHTTPCookie *cookie in cookies) {
+        [entries addObject:[cookie properties] ?: @{}];
+    }
+    return [entries writeToFile:[NSString stringWithUTF8String:path]
+                     atomically:YES] ? 1 : 0;
+}
+
+__attribute__((visibility("default")))
+int rigel_wk_cookies_restore(const char *path) {
+    if (path == NULL) return 0;
+    NSArray<NSDictionary *> *entries =
+        [NSArray arrayWithContentsOfFile:[NSString stringWithUTF8String:path]];
+    if (entries.count == 0) return 0;
+    WKHTTPCookieStore *store = WKWebsiteDataStore.defaultDataStore.httpCookieStore;
+    __block NSInteger remaining = (NSInteger)entries.count;
+    for (NSDictionary *properties in entries) {
+        NSHTTPCookie *cookie = [NSHTTPCookie cookieWithProperties:properties];
+        if (cookie == nil) {
+            remaining--;
+            continue;
+        }
+        [store setCookie:cookie completionHandler:^{ remaining--; }];
+    }
+    // Replays must settle before the first navigation or the restored
+    // session cookies won't ride along; the deadline guards against a wedged
+    // network process never answering.
+    CFAbsoluteTime deadline = CFAbsoluteTimeGetCurrent() + 10;
+    while (remaining > 0 && CFAbsoluteTimeGetCurrent() < deadline) {
+        [[NSRunLoop mainRunLoop] runMode:NSDefaultRunLoopMode
+                              beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+    }
+    return (int)entries.count;
+}
+
 
 /* Combined resident bytes of this process's WebKit helper children
  * (WebContent/Networking/GPU). This replaces the old `/bin/ps -A` shell-out

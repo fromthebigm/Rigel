@@ -25,6 +25,7 @@ public final class BrowserApplication {
     }
 
     public void run() {
+        installCookieShutdownHook();
         RigelBrowser.configureAv1NormalizationAllSites(
                 settings.isAv1NormalizationAllSitesEnabled());
         RigelBrowser.configureContentBlocking(settings.isBlocklistEnabled());
@@ -35,13 +36,47 @@ public final class BrowserApplication {
             proxyServer.start();
             restorePersistedUpstream();
             configureWebRouting();
+            // WebKit never gets a clean network-process exit on this host (the
+            // JVM leaves the moment the last window closes), so its
+            // HTTPStorages jar is never flushed and on-disk cookies freeze.
+            // Replay the snapshot of the last session before the first page
+            // can navigate; saved again below once all windows are gone.
+            restoreCookies();
             openWindow(true);
             while (!display.isDisposed() && !windows.isEmpty()) {
                 if (!display.readAndDispatch()) display.sleep();
             }
         } finally {
+            saveCookies();
             if (proxyServer != null) proxyServer.stop();
         }
+    }
+
+    /** Snapshot cookies from a JVM shutdown hook (TERM/kill paths) where the
+     * caller is NOT the SWT thread — the bridge handles the cross-thread
+     * round-trip to the main runloop itself. */
+    private void installCookieShutdownHook() {
+        Runtime.getRuntime().addShutdownHook(new Thread(this::saveCookies, "RigelCookieSave"));
+    }
+
+    private void saveCookies() {
+        try {
+            MacWKWebView.saveCookies(cookieSnapshot());
+        } catch (Throwable failure) {
+            System.err.println("[Rigel] Cookie snapshot failed: " + failure.getMessage());
+        }
+    }
+
+    private void restoreCookies() {
+        try {
+            MacWKWebView.restoreCookies(cookieSnapshot());
+        } catch (Throwable failure) {
+            System.err.println("[Rigel] Cookie restore failed: " + failure.getMessage());
+        }
+    }
+
+    private java.nio.file.Path cookieSnapshot() {
+        return Settings.DIR.resolve("cookies.store");
     }
 
     private void restorePersistedUpstream() {

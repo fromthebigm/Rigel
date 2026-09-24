@@ -59,6 +59,8 @@ final class MacWKWebView extends Composite {
     private interface Bridge extends Library {
         int rigel_wk_supported();
         long rigel_webkit_memory_bytes();
+        int rigel_wk_cookies_save(String path);
+        int rigel_wk_cookies_restore(String path);
         void rigel_wk_set_proxy_port(int proxyPort);
         void rigel_wk_set_proxy(int proxyPort, int proxyMode);
         void rigel_wk_set_av1_normalization(Pointer handle, int enabled);
@@ -378,6 +380,31 @@ final class MacWKWebView extends Composite {
             return bridge().rigel_webkit_memory_bytes();
         } catch (Throwable unavailable) {
             return -1;
+        }
+    }
+
+    /**
+     * Snapshot the shared WKHTTPCookieStore to a plist at the given absolute
+     * path. WebKit only flushes the HTTPStorages jar when the network helper
+     * exits cleanly, and this host exits the JVM the moment the last window
+     * closes, so without an explicit snapshot site sessions are never written
+     * to disk. Must run on the SWT/main thread (the bridge pumps the main
+     * runloop for the async store round-trip).
+     */
+    static boolean saveCookies(Path path) {
+        try {
+            return bridge().rigel_wk_cookies_save(path.toAbsolutePath().toString()) == 1;
+        } catch (Throwable unavailable) {
+            return false;
+        }
+    }
+
+    /** Replay a snapshot taken by {@link #saveCookies} into the shared store. */
+    static boolean restoreCookies(Path path) {
+        try {
+            return bridge().rigel_wk_cookies_restore(path.toAbsolutePath().toString()) > 0;
+        } catch (Throwable unavailable) {
+            return false;
         }
     }
 
