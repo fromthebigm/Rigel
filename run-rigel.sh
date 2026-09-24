@@ -21,6 +21,33 @@ if [[ -d "$DIR/jdk/Contents/Home" ]]; then
 fi
 xattr -dr com.apple.quarantine "$DIR" 2>/dev/null || true
 
+# Portable sign-in continuity. dock_identity.dylib pins the process identity
+# to com.rigel.weather-host (the Weather.app bundle beside this script), so
+# WebKit's cookie jar lives at a stable path on every machine and JDK. Back
+# the previous session's jar into Support/ at every launch, restore it if
+# WebKit ever loses it, and (once) carry forward a jar that was written under
+# the old JDK-vendor identity so existing sign-ins survive the switch.
+COOKIES_DIR="$HOME/Library/HTTPStorages"
+COOKIES="$COOKIES_DIR/com.rigel.weather-host.binarycookies"
+SUPPORT_DIR="$DIR/Support"
+BACKUP="$SUPPORT_DIR/cookie-jar.binarycookies"
+mkdir -p "$SUPPORT_DIR" "$COOKIES_DIR"
+if [[ -f "$COOKIES" ]]; then
+  cp -f "$COOKIES" "$BACKUP" 2>/dev/null || true
+elif [[ -f "$BACKUP" ]]; then
+  cp -f "$BACKUP" "$COOKIES" 2>/dev/null || true
+else
+  for legacy in com.azul.zulu.java net.java.openjdk.java com.oracle.java.jdk; do
+    if [[ -f "$COOKIES_DIR/$legacy.binarycookies" ]]; then
+      cp -f "$COOKIES_DIR/$legacy.binarycookies" "$BACKUP" 2>/dev/null || true
+      break
+    fi
+  done
+  if [[ -f "$BACKUP" ]]; then
+    cp -f "$BACKUP" "$COOKIES" 2>/dev/null || true
+  fi
+fi
+
 # Terminal exports its own bundle identity to child processes. If Java inherits
 # it, LaunchServices can keep treating Rigel as part of Terminal: Terminal stays
 # active in the menu bar and the otherwise-visible Rigel window may not receive
