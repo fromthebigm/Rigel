@@ -45,10 +45,11 @@ public class BrowserUI {
     /** Reserved band under the traffic lights when glass turns the window
      *  into a full-size-content view. Matches the native titlebar height. */
     private static final int GLASS_TITLE_STRIP_HEIGHT = 28;
-    // Chrome paint alpha while glass is active (~38%): the material behind
-    // must dominate, with the theme only tinting it.
-    private static final int GLASS_CHROME_TINT_ALPHA = 96;
-    private static final int GLASS_SIDEBAR_TINT_ALPHA = 118;
+    // Chrome/sidebar paint alphas while glass is active (~9%): the material
+    // behind must dominate — the theme only tints it. (The old 38%/46%
+    // values are what made the bars read as flat grey on dark mode.)
+    private static final int GLASS_CHROME_TINT_ALPHA = 22;
+    private static final int GLASS_SIDEBAR_TINT_ALPHA = 24;
     private static final String DATA_ACTIVE_WINDOW = "rigel.activeWindow";
     private static final String DATA_SYSTEM_MENU_WIRED = "rigel.systemMenuWired";
     private static final String DATA_ACCESSIBLE_NAME = "rigel.accessibleName";
@@ -746,7 +747,9 @@ public class BrowserUI {
         // Light mode: SAND's deep tone is a warm brown; layered at 18% over
         // the bright under-window material it reads muddy and cheap. Use a
         // neutral near-white overlay instead so light glass stays clean.
-        double tintAlpha = darkAppearance ? 0.34 : 0.22;
+        // Dark mode keeps a light theme-tinted glaze so the bars stay
+        // translucent instead of the flat grey panel it used to be.
+        double tintAlpha = darkAppearance ? 0.10 : 0.18;
         int tintRgb = darkAppearance ? effectiveTheme.chromeDeep : 0xF7F5F8;
         windowGlassApplied = MacVibrancy.applyWindowGlass(shell, enabled,
                 MacVibrancy.MATERIAL_UNDER_WINDOW, tintAlpha,
