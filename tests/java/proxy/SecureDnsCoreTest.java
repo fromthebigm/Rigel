@@ -38,8 +38,39 @@ public final class SecureDnsCoreTest {
 
         testSingleFlightUnderParallelConnectFanOut();
         testCacheSuppliesSubsequentLookupsAndRotatesAddresses();
+        testDualStackAnswersPreferReachableFamily();
         testNxdomainIsAuthoritativeAndNegativeCached();
         testTransportFailureLeavesNoCachedOrInFlightState();
+    }
+
+    /**
+     * Dual-stack answers (A + AAAA) must never round-robin onto the v6
+     * address: on an IPv4-only or half-broken-v6 network that hard-fails
+     * every other CONNECT (real report: tailscale.com unreachable). Any v6
+     * pick here means the family preference regressed.
+     */
+    private static void testDualStackAnswersPreferReachableFamily() throws Exception {
+        SecureDns.setMode(SecureDns.Mode.CLOUDFLARE);
+        SecureDns.BACKEND_OVERRIDE = type -> {
+            if (type == 1) {
+                return new SecureDns.Response(List.of(EDGE_A, EDGE_B), 300, false, false);
+            }
+            return new SecureDns.Response(
+                    List.of(InetAddress.getByName("2001:db8::1")), 300, false, false);
+        };
+        try {
+            for (int i = 0; i < 8; i++) {
+                InetSocketAddress resolved = SecureDns.resolve("dual.example", 443);
+                if (!(resolved.getAddress() instanceof java.net.Inet4Address)) {
+                    throw new AssertionError(
+                            "dual-stack rotation handed out IPv6 on a mixed answer: "
+                                    + resolved.getAddress());
+                }
+            }
+        } finally {
+            SecureDns.BACKEND_OVERRIDE = null;
+            SecureDns.setMode(SecureDns.Mode.CLOUDFLARE);
+        }
     }
 
     /**

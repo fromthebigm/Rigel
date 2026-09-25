@@ -327,20 +327,41 @@ public final class SecureDns {
         }, LOOKUP_POOL);
     }
 
-    /** Picks the next cached address round-robin; negative entries throw. */
+    /** Picks the next cached address round-robin; negative entries throw.
+     * When the answer set has both families, only the IPv4 ones rotate: a v6
+     * pick on a network with dead IPv6 (very common) hard-fails the CONNECT
+     * with no transport-level retry — dual-stack sites (tailscale.com, AWS
+     * Global Accelerator frontends, …) otherwise break for ~half of all
+     * connection attempts this resolver hands out. v6-only hosts are
+     * untouched, and rotation still spreads load across v4 edges within a
+     * TTL window. */
     private static InetSocketAddress addressFrom(CacheEntry entry, int port, String host)
             throws UnknownHostException {
         List<InetAddress> addresses = entry.addresses();
         if (addresses.isEmpty()) throw new UnknownHostException(host);
+        List<InetAddress> v4 = new ArrayList<>(addresses.size());
+        for (InetAddress address : addresses) {
+            if (address instanceof Inet4Address) v4.add(address);
+        }
+        if (!v4.isEmpty()) addresses = v4;
         InetAddress pick = addresses.get(
                 Math.floorMod(ROTATION.getAndIncrement(), addresses.size()));
         return new InetSocketAddress(pick, port);
     }
 
-    /** System resolver path shared by SYSTEM mode and the DoH fallback. */
+    /** System resolver path shared by SYSTEM mode and the DoH fallback. The
+     * same family preference as {@link #addressFrom} applies: system
+     * answers can come back AAAA-first even on IPv4-only networks. */
     private static InetSocketAddress systemResolve(String host, int port)
             throws UnknownHostException {
-        return new InetSocketAddress(InetAddress.getByName(host), port);
+        InetAddress[] all = InetAddress.getAllByName(host);
+        if (all.length == 0) throw new UnknownHostException(host);
+        for (InetAddress address : all) {
+            if (address instanceof Inet4Address) {
+                return new InetSocketAddress(address, port);
+            }
+        }
+        return new InetSocketAddress(all[0], port);
     }
 
     /** RFC 8484 GET exchange against each endpoint until one succeeds. */

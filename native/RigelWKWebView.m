@@ -684,6 +684,9 @@ static NSString *TikTokNetworkDiagnosticsScript(void) {
     NSProgress *progress = state.download.progress;
     int64_t completed = progress.completedUnitCount;
     int64_t total = progress.totalUnitCount;
+    if (getenv("RIGEL_DL_DIAG") != NULL) {
+        NSLog(@"[Rigel dl-diag] progress %lld/%lld", completed, total);
+    }
     if (completed != state.lastCompleted || total != state.lastTotal) {
         state.lastCompleted = completed;
         state.lastTotal = total;
@@ -1108,7 +1111,17 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
                 decisionHandler(WKNavigationActionPolicyCancel);
                 return;
             }
-            decisionHandler(WKNavigationActionPolicyDownload);
+            // The navigation→download morph (policy=Download) instant-cancels
+            // the created WKDownload on this WebKit (observed as
+            // NSURLErrorCancelled at 0 bytes, every time). Starting the
+            // transfer as a purpose-built download task avoids the morph
+            // handoff entirely.
+            decisionHandler(WKNavigationActionPolicyCancel);
+            [webView startDownloadUsingRequest:navigationAction.request
+                             completionHandler:^(WKDownload *download) {
+                download.delegate = self;
+                [self registerDownload:download];
+            }];
             return;
         }
     }
@@ -1164,7 +1177,19 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
     }
     if ((attachment || !navigationResponse.canShowMIMEType) && url != nil) {
         if (@available(macOS 11.3, *)) {
-            decisionHandler(WKNavigationResponsePolicyDownload);
+            if (getenv("RIGEL_DL_DIAG") != NULL) {
+                NSLog(@"[Rigel dl-diag] policy=Download for %@ type=%@ showable=%d",
+                      url.host, response.MIMEType, navigationResponse.canShowMIMEType);
+            }
+            // See the action-policy site: morphing a navigation into a
+            // download self-cancels here; explicit start does not.
+            decisionHandler(WKNavigationResponsePolicyCancel);
+            [webView startDownloadUsingRequest:[NSURLRequest requestWithURL:url]
+                             completionHandler:^(WKDownload *download) {
+                download.delegate = self;
+                [self registerDownload:download];
+            }];
+            return;
         } else {
             decisionHandler(WKNavigationResponsePolicyCancel);
             dispatch_async(dispatch_get_main_queue(), ^{ [self downloadURL:url]; });
@@ -1187,6 +1212,10 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
        didBecomeDownload:(WKDownload *)download API_AVAILABLE(macos(11.3)) {
     (void)webView;
     (void)navigationResponse;
+    if (getenv("RIGEL_DL_DIAG") != NULL) {
+        NSLog(@"[Rigel dl-diag] navigationResponse became download: %@",
+              download.originalRequest.URL.absoluteString);
+    }
     [self registerDownload:download];
 }
 
@@ -1237,6 +1266,10 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
     };
 
     if (!_askBeforeDownload) {
+        if (getenv("RIGEL_DL_DIAG") != NULL) {
+            NSLog(@"[Rigel dl-diag] auto-saving %@ to %@",
+                  state.name, directory.path);
+        }
         begin(UniqueDownloadURL(directory, state.name));
         return;
     }
@@ -1266,12 +1299,20 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
 }
 
 - (void)downloadDidFinish:(WKDownload *)download API_AVAILABLE(macos(11.3)) {
+    if (getenv("RIGEL_DL_DIAG") != NULL) {
+        NSLog(@"[Rigel dl-diag] finished: %@", download.originalRequest.URL.absoluteString);
+    }
     [self completeDownload:download event:@"finished" error:@""];
 }
 
 - (void)download:(WKDownload *)download didFailWithError:(NSError *)error
       resumeData:(NSData *)resumeData API_AVAILABLE(macos(11.3)) {
     (void)resumeData;
+    if (getenv("RIGEL_DL_DIAG") != NULL) {
+        NSLog(@"[Rigel dl-diag] failed: %@ error=%@:%ld %@",
+              download.originalRequest.URL.absoluteString,
+              error.domain, (long)error.code, error.localizedDescription);
+    }
     RigelWKDownloadState *state = [self stateForDownload:download];
     NSString *event = state.cancelled ? @"cancelled" : @"failed";
     [self completeDownload:download event:event
