@@ -1,6 +1,8 @@
 # Personal browser state. Never commit cookies, signed-in sessions, history,
 # bookmarks, preferences, caches, downloads, or WebKit website databases.
 /portable-data/
+/Support/cookie-jar.binarycookies
+/Support/cookies.store
 
 # Local/generated build output.
 /build/

@@ -19,6 +19,12 @@ public final class BrowserApplication {
     private final List<BrowserUI> windows = new ArrayList<>();
     private ProxyServer proxyServer;
     private boolean quitting;
+    /** Last time a cookie snapshot was successfully written (main-thread
+     *  autosave or clean quit). The TERM-path save must not run when one of
+     *  these is fresh — see saveCookiesAtShutdown(). */
+    private volatile long lastCookieSnapshotOkAt;
+    private static final int COOKIE_AUTOSAVE_MS = 45_000;
+    private static final long COOKIE_AUTOSAVE_NANOS = COOKIE_AUTOSAVE_MS * 1_000_000L; // 45s
 
     public BrowserApplication(Display display) {
         this.display = display;
@@ -42,7 +48,18 @@ public final class BrowserApplication {
             // Replay the snapshot of the last session before the first page
             // can navigate; saved again below once all windows are gone.
             restoreCookies();
+            if (System.getenv("RIGEL_COOKIE_DEBUG") != null) {
+                // Diagnostic: where do replayed cookies stand over time?
+                // debugNN = snapshot NN seconds after startup.
+                MacWKWebView.saveCookies(Settings.DIR.resolve("cookies.debug00.store"));
+                for (int mark : new int[] {4, 10, 14, 20, 28, 40, 60, 75}) {
+                    display.timerExec(mark * 1000, () ->
+                            MacWKWebView.saveCookies(Settings.DIR.resolve(
+                                    "cookies.debug" + mark + ".store")));
+                }
+            }
             openWindow(true);
+            scheduleCookieAutosave();
             while (!display.isDisposed() && !windows.isEmpty()) {
                 if (!display.readAndDispatch()) display.sleep();
             }
@@ -56,12 +73,49 @@ public final class BrowserApplication {
      * caller is NOT the SWT thread — the bridge handles the cross-thread
      * round-trip to the main runloop itself. */
     private void installCookieShutdownHook() {
-        Runtime.getRuntime().addShutdownHook(new Thread(this::saveCookies, "RigelCookieSave"));
+        Runtime.getRuntime().addShutdownHook(new Thread(this::saveCookiesAtShutdown, "RigelCookieSave"));
+    }
+
+    /** Live refresh on the display timer, so the portable snapshot on disk is
+     * never more than 45 s behind the real session — regardless of how the
+     * process later dies. */
+    private void scheduleCookieAutosave() {
+        Runnable tick = new Runnable() {
+            public void run() {
+                if (display.isDisposed()) return;
+                saveCookies();
+                display.timerExec(COOKIE_AUTOSAVE_MS, this);
+            }
+        };
+        // First tick soon after launch (the restored state is worth landing on
+        // disk immediately), then every 45 s.
+        display.timerExec(20_000, tick);
+    }
+
+    private void saveCookiesAtShutdown() {
+        // The death-time WKHTTPCookieStore fetch races AppKit/WebKit teardown
+        // and has been observed silently serving the OLD on-disk view: 161
+        // live cookies on the main thread seconds earlier came back from the
+        // hook's fetch as the previous snapshot's 4, and the write then
+        // clobbered the good file with the stale set. A timer-driven snapshot
+        // already on disk beats anything the teardown fetch can see, so when
+        // one is fresh, keep it and skip the fetch entirely. Only young
+        // sessions (no autosave yet) still take the live fetch — that path is
+        // what the r7 harness exercised all along.
+        if (System.nanoTime() - lastCookieSnapshotOkAt < COOKIE_AUTOSAVE_NANOS * 3 / 2) {
+            return;  // autosave is fresh; the teardown fetch is untrustworthy
+        }
+        saveCookies();
     }
 
     private void saveCookies() {
         try {
-            MacWKWebView.saveCookies(cookieSnapshot());
+            if (MacWKWebView.saveCookies(cookieSnapshot())) {
+                lastCookieSnapshotOkAt = System.nanoTime();
+                mirrorCookieSnapshot();
+            } else {
+                System.err.println("[Rigel] Cookie snapshot failed");
+            }
         } catch (Throwable failure) {
             System.err.println("[Rigel] Cookie snapshot failed: " + failure.getMessage());
         }
@@ -69,14 +123,51 @@ public final class BrowserApplication {
 
     private void restoreCookies() {
         try {
-            MacWKWebView.restoreCookies(cookieSnapshot());
+            // First disarm WebKit's ITP storage sweep: it deletes replayed
+            // cookies within seconds (no interaction records in a fresh
+            // store), which is exactly the "logins don't save" trap.
+            MacWKWebView.disableStorageSweeps();
+            // Sign-ins that live OUTSIDE the portable folder (older identity
+            // jars in the real home) are additive and replay first; the
+            // portable snapshot goes last so current state wins any overlap.
+            java.nio.file.Path imported = CookieImport.syncIn(Settings.DIR);
+            if (imported != null) {
+                System.err.println("[Rigel] Replay import -> " + MacWKWebView.restoreCookies(imported));
+            }
+            // If the primary snapshot is missing or unreadable, sessions fall
+            // back to the Support copy — logins keep working exactly as if
+            // WebKit's own jar had never broken.
+            int restored = MacWKWebView.restoreCookies(cookieSnapshot());
+            if (restored == 0 && java.nio.file.Files.isRegularFile(cookieSnapshotFallback())) {
+                restored = MacWKWebView.restoreCookies(cookieSnapshotFallback());
+                System.err.println("[Rigel] Sign-ins restored from the Support fallback snapshot");
+            }
+            System.err.println("[Rigel] Replay snapshot -> " + restored);
         } catch (Throwable failure) {
             System.err.println("[Rigel] Cookie restore failed: " + failure.getMessage());
         }
     }
 
+    /** Belt-and-suspenders copy outside portable-data (same philosophy as
+     * run.sh's Support/cookie-jar backup): survives a wiped profile, and the
+     * restore path above falls back to it transparently. */
+    private void mirrorCookieSnapshot() {
+        try {
+            java.nio.file.Path fallback = cookieSnapshotFallback();
+            java.nio.file.Files.createDirectories(fallback.getParent());
+            java.nio.file.Files.copy(cookieSnapshot(), fallback,
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        } catch (Throwable failure) {
+            System.err.println("[Rigel] Cookie fallback copy failed: " + failure.getMessage());
+        }
+    }
+
     private java.nio.file.Path cookieSnapshot() {
         return Settings.DIR.resolve("cookies.store");
+    }
+
+    private java.nio.file.Path cookieSnapshotFallback() {
+        return Settings.ROOT.resolve("Support").resolve("cookies.store");
     }
 
     private void restorePersistedUpstream() {

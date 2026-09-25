@@ -2,6 +2,7 @@
 #import <WebKit/WebKit.h>
 #import <Network/Network.h>
 #include <limits.h>
+#include <objc/message.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2401,6 +2402,28 @@ static NSArray<NSHTTPCookie *> *RigelCookieStoreFetchAll(void) {
         if (wait != 0) finished = NO;
     }
     return finished ? cookies : nil;
+}
+
+/* Long-stable WebKit SPI (present since the ITP era, still on macOS 26;
+ * gated by respondsToSelector: so a future WebKit that drops it degrades to a
+ * log line, not a crash): with resource-load statistics enabled, the data
+ * store DELETES website data — cookies included — for domains with no
+ * recorded user interaction in that store. A replayed snapshot restores
+ * cookies without interaction records, so the sweep erases restored logins
+ * seconds after the network process starts (observed: 157 replayed cookies
+ * present at t=0s and t=+4s, all gone by t=+17s while visited-domain cookies
+ * survived — the classic "logins don't save" report). This only disables the
+ * statistics cleanup for Rigel's own shared data store. */
+__attribute__((visibility("default")))
+void rigel_wk_disable_resource_load_statistics(void) {
+    WKWebsiteDataStore *store = [WKWebsiteDataStore defaultDataStore];
+    SEL toggle = NSSelectorFromString(@"_setResourceLoadStatisticsEnabled:");
+    if ([store respondsToSelector:toggle]) {
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(store, toggle, NO);
+    } else {
+        NSLog(@"[Rigel] WebKit exposes no resource-load-statistics toggle; "
+              "restored cookies may still be swept on this system");
+    }
 }
 
 __attribute__((visibility("default")))

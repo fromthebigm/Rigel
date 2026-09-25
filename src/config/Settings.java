@@ -26,7 +26,9 @@ import java.util.Properties;
  */
 public class Settings {
 
-    public static final Path DIR  = distRoot().resolve("portable-data").resolve("profile");
+    /** Portable package root — the folder holding portable-data/ and Support/. */
+    public static final Path ROOT = distRoot();
+    public static final Path DIR  = ROOT.resolve("portable-data").resolve("profile");
     public static final Path FILE = DIR.resolve("settings.properties");
 
     private static final long MAX_SETTINGS_FILE_BYTES = 4L * 1024L * 1024L;

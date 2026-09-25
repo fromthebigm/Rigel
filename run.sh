@@ -19,6 +19,9 @@ DIR="${0:A:h}"
 PORTABLE_HOME="$DIR/portable-data"
 REAL_HOME="$HOME"
 WK_ID="com.azul.zulu.java"
+# Where previous generations left their WebKit jars; the browser reads this to
+# sync outside sign-ins into the portable store (see CookieImport.java).
+export RIGEL_REAL_HOME="$REAL_HOME"
 mkdir -p \
   "$PORTABLE_HOME/Library/HTTPStorages" \
   "$PORTABLE_HOME/Library/WebKit" \
@@ -47,6 +50,24 @@ for legacy in net.java.openjdk.java com.oracle.java.jdk com.rigel.weather-host; 
   migrate_portable_store "$REAL_HOME/Library/HTTPStorages/$legacy.binarycookies" \
                          "$PORTABLE_HOME/Library/HTTPStorages/$WK_ID.binarycookies"
 done
+
+# WebsiteData adoption from older identities: if the portable store for the
+# current identity does not exist yet but the real home has one left by an
+# older Rigel identity (weather-host era, a previous JDK), adopt the newest so
+# localStorage/IndexedDB-based sign-ins carry over too. Copy, never move.
+if [[ ! -d "$PORTABLE_HOME/Library/WebKit/$WK_ID" ]]; then
+  newest_webdata=""
+  for other in net.java.openjdk.java com.oracle.java.jdk com.rigel.weather-host; do
+    candidate="$REAL_HOME/Library/WebKit/$other"
+    [[ -d "$candidate" ]] || continue
+    if [[ -z "$newest_webdata" || "$candidate" -nt "$newest_webdata" ]]; then
+      newest_webdata="$candidate"
+    fi
+  done
+  if [[ -n "$newest_webdata" ]]; then
+    cp -R "$newest_webdata" "$PORTABLE_HOME/Library/WebKit/$WK_ID" 2>/dev/null || true
+  fi
+fi
 
 # Cookie-jar belt-and-suspenders: back the jar into Support/ at every launch
 # (it reflects the previous session), restore it if WebKit ever loses it.

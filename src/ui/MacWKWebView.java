@@ -61,6 +61,7 @@ final class MacWKWebView extends Composite {
         long rigel_webkit_memory_bytes();
         int rigel_wk_cookies_save(String path);
         int rigel_wk_cookies_restore(String path);
+        void rigel_wk_disable_resource_load_statistics();
         void rigel_wk_set_proxy_port(int proxyPort);
         void rigel_wk_set_proxy(int proxyPort, int proxyMode);
         void rigel_wk_set_av1_normalization(Pointer handle, int enabled);
@@ -383,6 +384,20 @@ final class MacWKWebView extends Composite {
         }
     }
 
+    /** Disable WebKit's resource-load-statistics sweep on the shared data
+     *  store. With it enabled, the store DELETES website data — cookies
+     *  included — for every domain without recorded user interaction, which
+     *  after a snapshot replay is all of them; observed live: 157 replayed
+     *  sign-in cookies present at +0s/+4s were erased by +17s. Call before
+     *  {@link #restoreCookies}. */
+    static void disableStorageSweeps() {
+        try {
+            bridge().rigel_wk_disable_resource_load_statistics();
+        } catch (Throwable unavailable) {
+            // Older dylib without the export: replay still runs, unprotected.
+        }
+    }
+
     /**
      * Snapshot the shared WKHTTPCookieStore to a plist at the given absolute
      * path. WebKit only flushes the HTTPStorages jar when the network helper
@@ -399,12 +414,14 @@ final class MacWKWebView extends Composite {
         }
     }
 
-    /** Replay a snapshot taken by {@link #saveCookies} into the shared store. */
-    static boolean restoreCookies(Path path) {
+    /** Replay a snapshot taken by {@link #saveCookies} into the shared store.
+     *  Returns the number of entries replayed (0 when the file is absent or
+     *  empty), so callers can fall back to another snapshot copy. */
+    static int restoreCookies(Path path) {
         try {
-            return bridge().rigel_wk_cookies_restore(path.toAbsolutePath().toString()) > 0;
+            return bridge().rigel_wk_cookies_restore(path.toAbsolutePath().toString());
         } catch (Throwable unavailable) {
-            return false;
+            return 0;
         }
     }
 

@@ -108,6 +108,8 @@ static void presentation_load_icon_environment(void) {
         }
         if (!mode || !*mode) mode = presetMode.UTF8String;
     }
+    if (light.length > 0) presentationIconLightPath = light;
+    if (dark.length > 0) presentationIconDarkPath = dark;
     if (mode && *mode) {
         NSString* value = [[[NSString stringWithUTF8String:mode] lowercaseString]
                                stringByTrimmingCharactersInSet:
@@ -158,6 +160,10 @@ static NSImage* presentation_resolved_image(void) {
 
 static void presentation_apply(NSApplication* application) {
     if (!application) return;
+    // Load env icon paths BEFORE the fixed-icon caching — otherwise the first
+    // apply sees empty presentationIcon{Light,Dark}Path and permanently caches
+    // the bundled icon.
+    presentation_load_icon_environment();
 
     NSMenu* mainMenu = [application mainMenu];
     if (presentationMenuName.length > 0 && mainMenu.numberOfItems > 0) {
