@@ -34,6 +34,37 @@ static NSString* presentationIconDarkPath;
 static NSString* presentationIconMode;
 static BOOL presentationIconEnvironmentLoaded;
 
+// This header is compiled BOTH under ARC (Rigel, BigM, Code-Portable) and
+// under MRC (several portable loaders). A static that stores an autoreleased
+// object without retaining it dangles after the next autorelease-pool drain,
+// and the re-apply on every activation then segfaults (shipped as
+// portable-2026.09.25; probe-verified exit 139/SIGSEGV under MRC). Route
+// EVERY write to these statics through here so both compile modes stay safe.
+// Values stored are NSCopying (NSString paths/modes, NSImage); nil is fine.
+static void presentation_store_object(id __strong* slot, id value) {
+#if __has_feature(objc_arc)
+    *slot = value;
+#else
+    [*slot release];
+    *slot = [value copy];
+#endif
+}
+
+// BIGM_PRESENTATION_DEBUG=1 logs icon resolution on every apply.
+// Function-local dispatch-free gate: this header is compiled as C (.m hosts)
+// too, where statics need constant initializers. Benign race: every thread
+// computes and writes the same value.
+static BOOL presentation_debug_enabled(void) {
+    static int value = -1;
+    if (value < 0) value = getenv("BIGM_PRESENTATION_DEBUG") != NULL;
+    return value != 0;
+}
+
+static void presentation_debug_log(NSString* message) {
+    if (presentation_debug_enabled())
+        fprintf(stderr, "[presentation] %s\n", message.UTF8String);
+}
+
 static BOOL presentation_is_application_item(NSMenuItem* item) {
     NSMenu* mainMenu = [NSApp mainMenu];
     return mainMenu.numberOfItems > 0 && [mainMenu itemAtIndex:0] == item;
@@ -108,17 +139,20 @@ static void presentation_load_icon_environment(void) {
         }
         if (!mode || !*mode) mode = presetMode.UTF8String;
     }
-    if (light.length > 0) presentationIconLightPath = light;
-    if (dark.length > 0) presentationIconDarkPath = dark;
+    if (light.length > 0) presentation_store_object((id*)&presentationIconLightPath, light);
+    if (dark.length > 0) presentation_store_object((id*)&presentationIconDarkPath, dark);
     if (mode && *mode) {
         NSString* value = [[[NSString stringWithUTF8String:mode] lowercaseString]
                                stringByTrimmingCharactersInSet:
                                    [NSCharacterSet whitespaceAndNewlineCharacterSet]];
         if ([value isEqualToString:@"light"] || [value isEqualToString:@"dark"]
                 || [value isEqualToString:@"system"]) {
-            presentationIconMode = value;
+            presentation_store_object((id*)&presentationIconMode, value);
         }
     }
+    presentation_debug_log([NSString stringWithFormat:
+        @"icon environment: light=%@ dark=%@ mode=%@",
+        presentationIconLightPath, presentationIconDarkPath, presentationIconMode]);
 }
 
 static NSImage* presentation_image_at_path(NSString* path) {
@@ -186,7 +220,13 @@ static void presentation_apply(NSApplication* application) {
     }
     NSImage* image = (presentationIconLightPath.length > 0 || presentationIconDarkPath.length > 0)
         ? presentation_resolved_image() : presentationDockIcon;
-    if (image) [application setApplicationIconImage:image];
+    if (image) {
+        presentation_debug_log([NSString stringWithFormat:
+            @"applying Dock icon (dynamic=%d, size=%@)",
+            (presentationIconLightPath.length > 0 || presentationIconDarkPath.length > 0),
+            NSStringFromSize(image.size)]);
+        [application setApplicationIconImage:image];
+    }
 }
 
 static void presentation_schedule_apply(void) {
@@ -348,10 +388,10 @@ static void presentation_install(
 // relaunch). Marked unused: embedded in several hosts; only some swap live.
 static __attribute__((unused)) void presentation_reload(void) {
     presentationIconEnvironmentLoaded = NO;
-    presentationIconLightPath = nil;
-    presentationIconDarkPath = nil;
-    presentationIconMode = nil;
-    presentationDockIcon = nil;
+    presentation_store_object((id*)&presentationIconLightPath, nil);
+    presentation_store_object((id*)&presentationIconDarkPath, nil);
+    presentation_store_object((id*)&presentationIconMode, nil);
+    presentation_store_object((id*)&presentationDockIcon, nil);
     presentation_schedule_apply();
 }
 
