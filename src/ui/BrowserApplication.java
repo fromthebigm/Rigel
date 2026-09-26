@@ -31,6 +31,12 @@ public final class BrowserApplication {
     }
 
     public void run() {
+        run(null);
+    }
+
+    /** @param startUrl deep link from the launcher (e.g. a website card); when
+     *  present the first window opens this page instead of homepage/session. */
+    public void run(String startUrl) {
         installCookieShutdownHook();
         RigelBrowser.configureAv1NormalizationAllSites(
                 settings.isAv1NormalizationAllSitesEnabled());
@@ -58,7 +64,11 @@ public final class BrowserApplication {
                                     "cookies.debug" + mark + ".store")));
                 }
             }
-            openWindow(true);
+            if (startUrl != null) {
+                openWindow(true, startUrl, -1, -1);
+            } else {
+                openWindow(true);
+            }
             scheduleCookieAutosave();
             while (!display.isDisposed() && !windows.isEmpty()) {
                 if (!display.readAndDispatch()) display.sleep();

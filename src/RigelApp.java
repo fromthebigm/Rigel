@@ -17,6 +17,19 @@ public class RigelApp {
 
     private static DockIdentity dockIdentity;
 
+    /** First http/https-ish argv, for launcher deep links ("open THIS page").
+     *  A bare host gets an https scheme; anything else is not a URL arg. */
+    private static String pickUrlArg(String[] args) {
+        if (args == null) return null;
+        for (String arg : args) {
+            if (arg == null) continue;
+            String trimmed = arg.trim();
+            if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) return trimmed;
+            if (trimmed.matches("[A-Za-z0-9.-]+\\.[A-Za-z]{2,}([/?#].*)?")) return "https://" + trimmed;
+        }
+        return null;
+    }
+
     public static void main(String[] args) {
         try {
             Path root = Path.of(System.getProperty("rigel.root", ".")).toAbsolutePath();
@@ -39,7 +52,7 @@ public class RigelApp {
                 }
             } catch (Exception ignored) {
             }
-            new BrowserApplication(display).run();
+            new BrowserApplication(display).run(pickUrlArg(args));
         } finally {
             if (dockIcon != null && !dockIcon.isDisposed()) dockIcon.dispose();
             if (!display.isDisposed()) display.dispose();
