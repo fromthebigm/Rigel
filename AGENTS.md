@@ -236,6 +236,32 @@ ditto -c -k --norsrc --noextattr --noqtn --noacl --keepParent <folder> <zip>
 after a zip was uploaded, rebuild the zip with the fixed dylibs and replace the asset
 under the same tag.
 
+## Ecosystem runtime-family contract (settled 2026-09-26 — do not re-litigate)
+
+The owner's rule for what may sit under BigM: every playable thing must bottom out in the
+two blessed identity-hardened runtime families — **hardened python** or **hardened Java** —
+plus Rigel's carved exception (WKWebView Content/Networking daemons are system-spawned and
+present no identity of their own). Compliant shapes: in-process hosting (dlopen+LC_MAIN,
+the ports' loader pattern), and hardened runtime **children** (Prism→java, Winebottle→wine)
+where the parent never exec-replaces its own image. NOT compliant: third-party identity
+trees that merely get launched (raw Wine without the injected loader, raw Roblox/Steam
+clients, anything Electron/Chromium-family like Heroic). There is no valid "shim or exec"
+workaround — the host keeps its identity by construction.
+
+Proven verdicts from the prototype session:
+- **Wine is possible and shipped** as `fromthebigm/Winebottle` (hardened-python parent →
+  wine64 child with cork_loader injected → identity presents inside the wine process;
+  prefix in portable-data/). Gcenx wine-staging builds are ad-hoc injectable; the ISA wall
+  (arm64 host can't map x86_64 grains) is whyWine can't be in-process, ever — Rosetta is
+  per-process.
+- **Roblox is out**: hardened runtime + library validation with no
+  disable-library-validation entitlement; it silently drops all DYLD_* (DYLD_PRINT produces
+  zero output), and ad-hoc re-signed copies still refused injection. Any deeper route is
+  anti-tamper territory (Byfron) — permanent no.
+- **Steam (CEF) and Heroic (Electron)**: banned by the family rule itself, no prototype.
+- Self-updating titles (Roblox-style) belong to the catalog's `selfUpdating: true` mode
+  (0.6.7+): BigM installs/launches, never version-polices.
+
 ## Cross-repo context (this session's ecosystem)
 
 - **BigM Launcher** (`~/Downloads/BigMLauncher`) is the parent launcher: it sets the
