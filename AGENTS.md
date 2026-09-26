@@ -248,12 +248,22 @@ trees that merely get launched (raw Wine without the injected loader, raw Roblox
 clients, anything Electron/Chromium-family like Heroic). There is no valid "shim or exec"
 workaround — the host keeps its identity by construction.
 
-Proven verdicts from the prototype session:
-- **Wine is possible and shipped** as `fromthebigm/Winebottle` (hardened-python parent →
-  wine64 child with cork_loader injected → identity presents inside the wine process;
-  prefix in portable-data/). Gcenx wine-staging builds are ad-hoc injectable; the ISA wall
-  (arm64 host can't map x86_64 grains) is whyWine can't be in-process, ever — Rosetta is
-  per-process.
+Proven verdicts from the prototype session (final reading: the CONTENT process must BE the
+blessed family — python or java — not merely be spawned by it):
+- **Wine is OUT (shipped then withdrawn on the strict reading).** The build worked —
+  hardened-python parent → wine64 child with the identity loader injected, proven from the
+  release zip — but the child presents as its own binary ("wine64" in ps/Activity Monitor),
+  which the owner ruled out: a recognizable wine process fails the contract, parentage
+  notwithstanding. A python-dlopen'd wine is physically impossible: working macOS wine is
+  x86_64, python is arm64, and an arm64 process cannot execute x86_64 code (Rosetta is
+  per-process, not per-page). An arm64-native wine would only run Windows-ARM PEs — a
+  game catalog that doesn't exist — and an in-process VM satisfies the letter of "inside
+  python's address space" but Windows guests on Virtualization.framework have no 3D driver,
+  so games software-render (unplayable). fromthebigm/Winebottle and its releases stay up
+  as the proof endoskeleton, but the app was REMOVED from BigM's catalog (0.6.9 / tag
+  portable-2026.09.26-r4) — do not re-add without owner sign-off on "child processes
+  presenting injected identity count as compliant"; if that lands, the port un-shelves in
+  one catalog line.
 - **Roblox is out**: hardened runtime + library validation with no
   disable-library-validation entitlement; it silently drops all DYLD_* (DYLD_PRINT produces
   zero output), and ad-hoc re-signed copies still refused injection. Any deeper route is
