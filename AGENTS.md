@@ -26,10 +26,35 @@ never change menu-bar/Dock names away from Google Chrome.
   contain user data.
 - Release zips are **runtime-only**. Keep: `run.sh`, `run-rigel.sh`, `jdk/`, `lib/`,
   `target/`, `classes/`, `resources/`, `Support/` (empty), `*.icns`, `*.dylib`,
-  `macos_presentation_identity.h`, preset PNGs, `Weather.app/`. Exclude: `src/`,
+  preset PNGs, `Weather.app/`, `Rigel.app/` stub. Exclude: `src/`,
   `native/`, `tests/`, `build.sh`, `test-rigel.sh`, `aitest.sh`, `*.md`, `.git/`,
+  `.gitignore`, `macos_presentation_identity.h` (source header — it's compiled INTO
+  `dock_identity.dylib`; nothing reads it at runtime; dropped from zips 2026-09-27),
   `build/`, `icon-flow/`, `portable-data/`, and both runtime `Support/` files
   (`cookie-jar.binarycookies`, `cookies.store`) — the zip ships `Support/` EMPTY.
+- **Port zips (2026-09-26-r1 rule): no dev/source files at all.** Payload roots must
+  contain zero `*.md`, `.gitignore`, `.gitattributes`, `*-build.json`, loader sources
+  (`*.mm`/`*.h`/`*.swift`), or build scripts — runtime `.py` launchers stay (they're the
+  entry point; they carry no secrets — the ticket key lives in BigM's Support and the
+  update token is compiled into BigM's dylib). Legal notices *inside* `.app` bundles stay
+  put. Asset basenames must match the catalog's `assetPattern` exactly — a stripped zip
+  uploaded as `Chiaki.zip` instead of `Chiaki-portable-*.zip` silently breaks updates
+  (burned once today, fixed same-day).
+  **2026-09-27 tightening:** the zero-list also covers the legacy in-zip updater stacks
+  (`update_*.py`, `update.sh`, `setup*.sh`, `get_*.sh`), dev harnesses (`test.sh`),
+  example configs (`*.example.json`), server-side ops scripts (Moonlight `relay/*.py` —
+  the *client* relay lives inside `moonlight_launch.py`; keep the `relay/` dir itself,
+  `relay/identity.json` is read at runtime), `.DS_Store`, and `*.dSYM`. "Runtime .py"
+  means the catalog `marker` entry file plus its import/subprocess closure — grep before
+  deleting (e.g. Ryujinx `run_version.py` imports `run_ryujinx_embedded`; Prism's
+  `launch_prism.py` needs `direct_proxy.py`). Payloads shipping a root `version.txt`
+  (Rigel, Code) must stamp it with the release's own tag — BigM's update flow verifies
+  the landed stamp against `release.tagName` and rolls back on mismatch. Boot
+  verification must be a TRUE first-run from a pristine extract, never a directory that
+  has run before: the 09.27 audit found two live zips that only worked on reused owner
+  folders — Moonlight shipped `Moonlight.app.zip` requiring a manual `setup.sh` step
+  (now ships pre-expanded, codesign re-verified) and Ryujinx's validator asserts
+  `userdata/` + `userdata-1.1.1397/` dirs no zip ever contained (now shipped empty).
 - **rsync gotcha:** unanchored `--exclude 'native'` also strips `classes/native/`
   (dropping the bridge dylib from the zip). Always anchor: `--exclude='/native'`.
 - Deep-audit before shipping; the user has been burned by rushed broken releases.
