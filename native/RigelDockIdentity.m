@@ -1,5 +1,6 @@
 #import <AppKit/AppKit.h>
 #include "../macos_presentation_identity.h"
+#include "../bigm_access_gate.h"
 
 // No bundle manipulation here. An earlier experiment redirected
 // [NSBundle mainBundle] to the Weather.app to pin WebKit's storage identity
@@ -14,6 +15,8 @@
 
 __attribute__((visibility("default")))
 void rigel_install_dock_identity(const char* bundle_path) {
+    // Standalone-access gate: BigM ticket -> keychain marker -> one-time key prompt.
+    bigm_gate_enforce("Rigel");
     if (!bundle_path) return;
     NSString* bundlePath = [NSString stringWithUTF8String:bundle_path];
     // The Weather preset lives beside dock_identity.dylib in the package

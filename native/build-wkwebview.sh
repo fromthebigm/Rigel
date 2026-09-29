@@ -17,7 +17,7 @@ codesign --force --sign - "$OUT"
 
 xcrun clang -fobjc-arc -fmodules -Wall -Wextra -Werror -O2 -dynamiclib \
   -mmacosx-version-min="$DEPLOYMENT_TARGET" -Wl,-dead_strip \
-  -framework Foundation -framework AppKit \
+  -framework Foundation -framework AppKit -framework Security \
   -install_name @rpath/dock_identity.dylib \
   -o "$ROOT/dock_identity.dylib" \
   "$ROOT/native/RigelDockIdentity.m"
