@@ -253,6 +253,7 @@ Tag `portable-YYYY.MM.DD[-rN]`, zip `Rigel-portable-<tag>.zip` (240MB with JDK) 
 
 ```zsh
 ditto -c -k --norsrc --noextattr --noqtn --noacl --keepParent <folder> <zip>
+./release-validate.sh <zip> <tag> <app-id>
 ```
 
 `version.txt` in the zip = tag + date (two lines). Publish with `gh release create` to
