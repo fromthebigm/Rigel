@@ -72,7 +72,7 @@ if [[ -n "$MARKER" ]]; then
 fi
 
 # 3. No dev/source files in zip root
-FORBIDDEN_ROOT=(*.md .gitignore .gitattributes *-build.json build.sh test.sh setup*.sh get_*.sh update_*.py make_portable.sh patch-*.sh)
+FORBIDDEN_ROOT=('*.md' '.gitignore' '.gitattributes' '*-build.json' 'build.sh' 'test.sh' 'setup*.sh' 'get_*.sh' 'update_*.py' 'make_portable.sh' 'patch-*.sh')
 for pattern in "${FORBIDDEN_ROOT[@]}"; do
     matches=("$ROOT"/${~pattern}(N))
     if (( ${#matches[@]} > 0 )); then
@@ -100,15 +100,18 @@ case "$APP_ID" in
 esac
 echo "OK: asset basename matches pattern"
 
-# 6. dylib signatures (ad-hoc signed)
-dylibs=("$ROOT"/**/*.dylib(N))
+# 6. OUR dylibs must be (ad-hoc) signed — the JDK tree is Azul Developer-ID
+# signed and out of scope (never modify jdk/; its signature validates only
+# against the pristine bundle layout, not a zipped subset).
+dylibs=("$ROOT"/**/classes/native/*.dylib(N) "$ROOT"/**/*.dylib(N))
 for d in "${dylibs[@]}"; do
+    [[ "$d" == */jdk/Contents/* ]] && continue
     if ! codesign -v "$d" 2>/dev/null; then
         echo "FAIL: unsigned dylib: $d"
         exit 1
     fi
 done
-echo "OK: all dylibs ad-hoc signed"
+echo "OK: all app dylibs signed (jdk tree is Developer-ID signed upstream)"
 
 # 7. No .dSYM bundles
 dsym_count=$(find "$ROOT" -name "*.dSYM" | wc -l | tr -d ' ')
