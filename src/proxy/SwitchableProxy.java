@@ -1,13 +1,18 @@
 package proxy;
 
+import io.netty.handler.codec.http.HttpHeaderNames;
+import io.netty.handler.codec.http.HttpObject;
 import io.netty.handler.codec.http.HttpRequest;
 import org.littleshoot.proxy.ChainedProxy;
 import org.littleshoot.proxy.ChainedProxyAdapter;
 import org.littleshoot.proxy.ChainedProxyManager;
 import org.littleshoot.proxy.ChainedProxyType;
 import org.littleshoot.proxy.impl.ClientDetails;
+import org.littleshoot.proxy.impl.ProxyUtils;
 
 import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.Queue;
 
 /**
@@ -70,6 +75,39 @@ public class SwitchableProxy implements ChainedProxyManager {
                 // HTTPS upstreams terminate the CONNECT chain inside TLS, so
                 // nothing between Rigel and the upstream can read hostnames.
                 return upstream.type() == ProxyServer.UpstreamType.HTTPS;
+            }
+            @Override
+            public String getUsername() {
+                // LittleProxy forwards these to Netty's per-type proxy handler:
+                // Basic Proxy-Authorization for HTTP/HTTPS CONNECT tunnels,
+                // RFC 1929 for SOCKS5, the USERID field for SOCKS4. Null means
+                // no auth and matches ChainedProxyAdapter's previous
+                // no-credentials path.
+                return upstream.hasCredentials() ? upstream.username() : null;
+            }
+            @Override
+            public String getPassword() {
+                return upstream.password().isEmpty() ? null : upstream.password();
+            }
+            @Override
+            public void filterRequest(HttpObject httpObject) {
+                // Runs at the chained-connection write step, AFTER client-side
+                // hop-by-hop stripping. LittleProxy's own upstream-auth hook
+                // (addUpstreamProxyAuthorization) fires earlier from the client
+                // connection and never attaches on this path, so plain
+                // (non-tunnelled) requests to an authenticated HTTP(S) upstream
+                // would otherwise carry no credentials at all.
+                if (getChainedProxyType() != ChainedProxyType.HTTP
+                        || !upstream.hasCredentials()) return;
+                if (httpObject instanceof HttpRequest request
+                        && !ProxyUtils.isCONNECT(httpObject)
+                        && !request.headers().contains(HttpHeaderNames.PROXY_AUTHORIZATION)) {
+                    String credentials = upstream.username() + ":" + upstream.password();
+                    String encoded = Base64.getEncoder().encodeToString(
+                            credentials.getBytes(StandardCharsets.ISO_8859_1));
+                    request.headers().set(
+                            HttpHeaderNames.PROXY_AUTHORIZATION, "Basic " + encoded);
+                }
             }
             @Override
             public javax.net.ssl.SSLEngine newSslEngine() {

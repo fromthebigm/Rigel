@@ -4385,6 +4385,11 @@ public class BrowserUI {
         Text hostText = settingsField(proxyForm, "e.g. 127.0.0.1");
         settingsLabel(proxyForm, "Port");
         Text portText = settingsField(proxyForm, "8080");
+        settingsLabel(proxyForm, "Username (optional)");
+        Text proxyUserText = settingsField(proxyForm, "leave empty for open proxies");
+        settingsLabel(proxyForm, "Password (optional)");
+        Text proxyPassText = settingsField(proxyForm, "");
+        proxyPassText.setEchoChar('•');
         if (proxyServer.isUsingUpstream()) {
             ProxyServer.UpstreamType currentType = proxyServer.getUpstreamType();
             proxyTypeCombo.select(switch (currentType) {
@@ -4395,6 +4400,8 @@ public class BrowserUI {
             });
             hostText.setText(proxyServer.getUpstreamHost());
             portText.setText(String.valueOf(proxyServer.getUpstreamPort()));
+            proxyUserText.setText(settings.getUpstreamUser());
+            proxyPassText.setText(settings.getUpstreamPass());
         } else {
             proxyTypeCombo.select(0);
         }
@@ -4402,6 +4409,9 @@ public class BrowserUI {
             boolean enabled = proxyTypeCombo.getSelectionIndex() > 0;
             hostText.setEnabled(enabled);
             portText.setEnabled(enabled);
+            proxyUserText.setEnabled(enabled);
+            // SOCKS4 carries only a USERID — no password field exists on the wire.
+            proxyPassText.setEnabled(enabled && proxyTypeCombo.getSelectionIndex() != 3);
         };
         proxyTypeCombo.addListener(SWT.Selection, event -> updateProxyFields.run());
         updateProxyFields.run();
@@ -4585,6 +4595,10 @@ public class BrowserUI {
             ProxyServer.Upstream previousUpstream = proxyServer.getUpstream();
             String h = hostText.getText().trim();
             String p = portText.getText().trim();
+            String proxyUser = proxyUserText.getText().trim();
+            // SOCKS4 has no password field on the wire; treat it as absent there.
+            String proxyPass = proxyTypeCombo.getSelectionIndex() == 3
+                    ? "" : proxyPassText.getText();
 
             if (hp.isEmpty()) {
                 showError(d, "Homepage cannot be empty.");
@@ -4596,6 +4610,10 @@ public class BrowserUI {
             }
             if (proxyTypeIndex > 0 && (h.isEmpty() || p.isEmpty())) {
                 showError(d, "Enter both an upstream proxy host and port.");
+                return;
+            }
+            if (proxyTypeIndex > 0 && !proxyPass.isEmpty() && proxyUser.isEmpty()) {
+                showError(d, "An upstream proxy password requires a username.");
                 return;
             }
 
@@ -4649,7 +4667,7 @@ public class BrowserUI {
                 settings.setControllerBridgeEnabled(controllerChk.getSelection());
                 settings.setControllerFaceLayout(faceLayout);
                 if (proxyTypeIndex == 0) settings.clearUpstream();
-                else settings.setUpstream(proxyTypeSetting, h, proxyPort);
+                else settings.setUpstream(proxyTypeSetting, h, proxyPort, proxyUser, proxyPass);
                 settings.setDnsMode(dnsModeSetting);
             });
             proxy.SecureDns.setMode(proxy.SecureDns.Mode.fromSetting(dnsModeSetting));
@@ -4666,7 +4684,7 @@ public class BrowserUI {
                 }
             }
             if (proxyTypeIndex == 0) proxyServer.clearUpstream();
-            else proxyServer.setUpstream(proxyType, h, proxyPort);
+            else proxyServer.setUpstream(proxyType, h, proxyPort, proxyUser, proxyPass);
             boolean proxyRoutingChanged = !Objects.equals(
                     previousUpstream, proxyServer.getUpstream());
             ensureWebProxyRouting();

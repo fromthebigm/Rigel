@@ -194,7 +194,9 @@ public final class BrowserApplication {
         }
         try {
             proxyServer.setUpstream(
-                    ProxyServer.UpstreamType.fromSetting(settings.getUpstreamType()), host, port);
+                    ProxyServer.UpstreamType.fromSetting(settings.getUpstreamType()),
+                    host, port,
+                    settings.getUpstreamUser(), settings.getUpstreamPass());
         } catch (IllegalArgumentException invalid) {
             System.err.println("[Rigel] Ignoring invalid saved upstream proxy; using DIRECT: "
                     + invalid.getMessage());

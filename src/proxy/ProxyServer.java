@@ -52,7 +52,19 @@ public class ProxyServer {
         public String settingValue() { return name().toLowerCase(); }
     }
 
-    public record Upstream(UpstreamType type, String host, int port) {}
+    public record Upstream(UpstreamType type, String host, int port,
+                           String username, String password) {
+        /** Compact constructor: credentials normalize to "" so records with
+         *  and without auth compare unequal only when credentials differ. */
+        public Upstream {
+            username = username == null ? "" : username;
+            password = password == null ? "" : password;
+        }
+        public Upstream(UpstreamType type, String host, int port) {
+            this(type, host, port, "", "");
+        }
+        public boolean hasCredentials() { return !username.isEmpty(); }
+    }
 
     private volatile HttpProxyServer server;
     private volatile int localPort = DEFAULT_LOCAL_PORT;
@@ -210,24 +222,43 @@ public class ProxyServer {
     }
 
     public void setUpstream(UpstreamType type, String host, int port) {
+        setUpstream(type, host, port, "", "");
+    }
+
+    public void setUpstream(UpstreamType type, String host, int port,
+                            String username, String password) {
         String cleanHost = host == null ? "" : host.trim();
+        String cleanUser = username == null ? "" : username;
+        String cleanPass = password == null ? "" : password;
         if (type == null || cleanHost.isEmpty() || port < 1 || port > 65535)
             throw new IllegalArgumentException("Invalid upstream proxy address");
+        // A password without a username has no defined wire behaviour on any
+        // of the four upstream types; reject rather than silently drop it.
+        if (cleanUser.isEmpty() && !cleanPass.isEmpty())
+            throw new IllegalArgumentException(
+                    "Upstream proxy password requires a username");
+        // SOCKS4's only identity field (USERID) maps to the username; a
+        // password would never leave this machine, so fail loudly.
+        if (type == UpstreamType.SOCKS4 && !cleanPass.isEmpty())
+            throw new IllegalArgumentException(
+                    "SOCKS4 upstreams do not support a password");
         // Validation and the loopback check run OUTSIDE the monitor: a slow
         // DoH exchange inside pointsAtLocalListener must never stall
         // stop()/start()/setUpstream on other threads for seconds.
         if (pointsAtLocalListener(cleanHost, port))
             throw new IllegalArgumentException(
                     "Upstream proxy cannot point to Rigel's own local listener");
-        applyUpstream(type, cleanHost, port);
+        applyUpstream(type, cleanHost, port, cleanUser, cleanPass);
     }
 
-    private synchronized void applyUpstream(UpstreamType type, String cleanHost, int port) {
-        Upstream next = new Upstream(type, cleanHost, port);
+    private synchronized void applyUpstream(UpstreamType type, String cleanHost, int port,
+                                            String cleanUser, String cleanPass) {
+        Upstream next = new Upstream(type, cleanHost, port, cleanUser, cleanPass);
         if (next.equals(upstream)) return;
         upstream = next;
         resetBrowserSessions();
-        System.out.println("[Rigel] Upstream set -> " + type + " " + cleanHost + ":" + port);
+        System.out.println("[Rigel] Upstream set -> " + type + " " + cleanHost + ":" + port
+                + (next.hasCredentials() ? " (authenticated)" : " (open)"));
     }
 
     public synchronized void clearUpstream() {

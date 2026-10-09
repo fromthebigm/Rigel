@@ -119,6 +119,14 @@ for watching replayed cookies live or die over the session).
   exists`** — never hand a dead-IPv6 network (that system or the DoH answer) a bare-AAAA
   CONNECT; sites like tailscale.com break otherwise. The dual-stack regression test lives
   in `tests/java/proxy/SecureDnsCoreTest.java`.
+  Upstream proxies (HTTP/HTTPS/SOCKS4/SOCKS5, set in Settings → Network) support optional
+  credentials (`proxy.user`/`proxy.pass`): HTTP(S) send Basic Proxy-Authorization on
+  CONNECT tunnels AND on plain forwarded requests (the latter via the chained proxy's
+  `filterRequest` — LittleProxy's own `addUpstreamProxyAuthorization` fires too early on
+  the client connection and never attaches on that path; proven by
+  `RigelProxyCoreTest`'s authed-HTTP mock). SOCKS5 negotiates RFC 1929 on both the netty
+  chain and the local UDP association; SOCKS4 maps the username to USERID (no password
+  — rejected by `ProxyServer.setUpstream`). Pass-without-user is rejected too.
 
 ### Native teardown rule (learned the hard way)
 

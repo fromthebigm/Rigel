@@ -48,6 +48,8 @@ public class Settings {
     private static final String K_UPSTREAM_TYPE = "proxy.type";
     private static final String K_UPSTREAM_HOST = "proxy.host";
     private static final String K_UPSTREAM_PORT = "proxy.port";
+    private static final String K_UPSTREAM_USER = "proxy.user";
+    private static final String K_UPSTREAM_PASS = "proxy.pass";
     private static final String K_DNS_MODE      = "dns.mode"; // system | cloudflare | google
     private static final String K_ZOOM          = "zoom";
     private static final String K_HISTORY_ON    = "history.enabled";
@@ -216,16 +218,25 @@ public class Settings {
         }
         catch (NumberFormatException e) { return -1; }
     }
+    public String getUpstreamUser() { return props.getProperty(K_UPSTREAM_USER, ""); }
+    public String getUpstreamPass() { return props.getProperty(K_UPSTREAM_PASS, ""); }
     public void setUpstream(String host, int port) {
         setUpstream("http", host, port);
     }
     public void setUpstream(String type, String host, int port) {
+        setUpstream(type, host, port, "", "");
+    }
+    public void setUpstream(String type, String host, int port, String user, String pass) {
         if (!validPort(port))
             throw new IllegalArgumentException("Upstream proxy port must be between 1 and 65535");
         props.setProperty(K_UPSTREAM_TYPE,
                 type == null || type.isBlank() ? "http" : type.trim().toLowerCase());
         props.setProperty(K_UPSTREAM_HOST, host == null ? "" : host);
         props.setProperty(K_UPSTREAM_PORT, Integer.toString(port));
+        if (user == null || user.isEmpty()) props.remove(K_UPSTREAM_USER);
+        else props.setProperty(K_UPSTREAM_USER, user);
+        if (pass == null || pass.isEmpty()) props.remove(K_UPSTREAM_PASS);
+        else props.setProperty(K_UPSTREAM_PASS, pass);
         save();
     }
     private static boolean validPort(int port) { return port >= 1 && port <= 65535; }
@@ -233,6 +244,8 @@ public class Settings {
         props.remove(K_UPSTREAM_TYPE);
         props.remove(K_UPSTREAM_HOST);
         props.remove(K_UPSTREAM_PORT);
+        props.remove(K_UPSTREAM_USER);
+        props.remove(K_UPSTREAM_PASS);
         save();
     }
 

@@ -827,10 +827,44 @@ public final class LoopbackSocks5Server implements AutoCloseable {
                 control.setSoTimeout(CONNECT_TIMEOUT_MS);
                 InputStream input = control.getInputStream();
                 OutputStream output = control.getOutputStream();
-                output.write(new byte[] {SOCKS_VERSION, 0x01, 0x00});
-                output.flush();
-                if (readByte(input) != SOCKS_VERSION || readByte(input) != 0x00) {
-                    throw new IOException("SOCKS5 upstream requires unsupported authentication");
+                if (upstream.hasCredentials()) {
+                    // RFC 1929: offer NO AUTH and USERNAME/PASSWORD and let the
+                    // upstream pick; an open UDP gate despite configured
+                    // credentials is accepted (the relay still works), an
+                    // explicit "no acceptable methods" is not.
+                    byte[] user = upstream.username().getBytes(StandardCharsets.UTF_8);
+                    byte[] pass = upstream.password().getBytes(StandardCharsets.UTF_8);
+                    if (user.length < 1 || user.length > 255 || pass.length > 255) {
+                        throw new IOException("SOCKS5 upstream credentials exceed RFC 1929 limits");
+                    }
+                    output.write(new byte[] {SOCKS_VERSION, 0x02, 0x00, 0x02});
+                    output.flush();
+                    if (readByte(input) != SOCKS_VERSION) {
+                        throw new IOException("Invalid SOCKS5 upstream auth reply");
+                    }
+                    int method = readByte(input);
+                    if (method == 0xFF) {
+                        throw new IOException("SOCKS5 upstream accepted no authentication method");
+                    }
+                    if (method == 0x02) {
+                        ByteArrayOutputStream auth = new ByteArrayOutputStream();
+                        auth.write(0x01);
+                        auth.write(user.length);
+                        auth.write(user);
+                        auth.write(pass.length);
+                        auth.write(pass);
+                        output.write(auth.toByteArray());
+                        output.flush();
+                        if (readByte(input) != 0x01 || readByte(input) != 0x00) {
+                            throw new IOException("SOCKS5 upstream rejected the credentials");
+                        }
+                    }
+                } else {
+                    output.write(new byte[] {SOCKS_VERSION, 0x01, 0x00});
+                    output.flush();
+                    if (readByte(input) != SOCKS_VERSION || readByte(input) != 0x00) {
+                        throw new IOException("SOCKS5 upstream requires unsupported authentication");
+                    }
                 }
 
                 output.write(new byte[] {

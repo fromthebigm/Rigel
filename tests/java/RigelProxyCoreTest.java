@@ -197,12 +197,70 @@ public final class RigelProxyCoreTest {
                         "upstream did not receive the original absolute URI");
                 require(udpAssociationStatus(browserPort) == 0x07,
                         "UDP was not rejected for a TCP-only HTTP upstream");
+                require(!request.toLowerCase().contains("proxy-authorization:"),
+                        "open HTTP upstream unexpectedly received credentials");
 
                 require("DIRECT_OK".equals(get(client, direct)),
                         "localhost was incorrectly routed through the upstream");
                 proxy.clearUpstream();
                 require("DIRECT_OK".equals(get(client, direct)),
                         "direct route did not recover after clearing upstream");
+            }
+
+            try (MockHttpProxy upstream = new MockHttpProxy()) {
+                // Authenticated HTTP upstream (the common shape on public
+                // proxy lists): Netty must attach Basic credentials. Distinct
+                // origin host: LittleProxy pools its upstream connections per
+                // destination, and reusing the previous block's pool entry
+                // would silently keep the old (unauthenticated) route.
+                proxy.setUpstream(ProxyServer.UpstreamType.HTTP,
+                        "127.0.0.1", upstream.port(), "alice", "s3cret");
+                URI throughUpstream = URI.create("http://rigel-auth-upstream.invalid/probe");
+                String authedBody = get(client, throughUpstream);
+                require("UPSTREAM_OK".equals(authedBody),
+                        "authenticated HTTP upstream route failed: " + authedBody);
+                String request = upstream.request().get(5, TimeUnit.SECONDS);
+                // Netty serializes the header NAME in its canonical lowercase
+                // form; the Basic value stays case-sensitive.
+                String lowerRequest = request.toLowerCase();
+                String expectedValue = "Basic " + java.util.Base64.getEncoder()
+                        .encodeToString("alice:s3cret".getBytes(StandardCharsets.UTF_8));
+                require(lowerRequest.contains("proxy-authorization:")
+                                && request.contains(expectedValue),
+                        "authenticated HTTP upstream did not receive Basic credentials,"
+                        + " got:\n" + request);
+                proxy.clearUpstream();
+
+                boolean rejectedPassOnly = false;
+                try {
+                    proxy.setUpstream(ProxyServer.UpstreamType.HTTP,
+                            "127.0.0.1", upstream.port(), "", "s3cret");
+                } catch (IllegalArgumentException expected) {
+                    rejectedPassOnly = true;
+                }
+                require(rejectedPassOnly,
+                        "password without a username was accepted for an HTTP upstream");
+                boolean rejectedSocks4Pass = false;
+                try {
+                    proxy.setUpstream(ProxyServer.UpstreamType.SOCKS4,
+                            "127.0.0.1", upstream.port(), "alice", "s3cret");
+                } catch (IllegalArgumentException expected) {
+                    rejectedSocks4Pass = true;
+                }
+                require(rejectedSocks4Pass,
+                        "a password was accepted for a SOCKS4 upstream");
+            }
+
+            try (MockSocks5TcpProxy upstream = new MockSocks5TcpProxy("alice", "s3cret")) {
+                // Authenticated SOCKS5 upstream on the TCP/CONNECT path: the
+                // LittleProxy chain must complete RFC 1929 before CONNECT.
+                proxy.setUpstream(ProxyServer.UpstreamType.SOCKS5,
+                        "127.0.0.1", upstream.port(), "alice", "s3cret");
+                URI throughUpstream = URI.create("http://rigel-socks5-auth.invalid/probe");
+                require("UPSTREAM_OK".equals(get(client, throughUpstream)),
+                        "authenticated SOCKS5 upstream route failed");
+                upstream.verify();
+                proxy.clearUpstream();
             }
 
             try (MockSocks5UdpProxy upstream = new MockSocks5UdpProxy()) {
@@ -213,6 +271,22 @@ public final class RigelProxyCoreTest {
                             "udp.example.test", 443, UPSTREAM_UDP_REQUEST);
                     require(Arrays.equals(UPSTREAM_UDP_RESPONSE, response.payload()),
                             "SOCKS5 upstream UDP response payload was corrupted");
+                }
+                upstream.verify();
+                proxy.clearUpstream();
+            }
+
+            try (MockSocks5UdpProxy upstream = new MockSocks5UdpProxy("alice", "s3cret")) {
+                // Authenticated SOCKS5 upstream on the UDP relay path (RFC
+                // 1929): the association must complete user/pass negotiation
+                // before the relay opens.
+                proxy.setUpstream(ProxyServer.UpstreamType.SOCKS5,
+                        "127.0.0.1", upstream.port(), "alice", "s3cret");
+                try (SocksUdpClient udp = SocksUdpClient.open(browserPort)) {
+                    UdpMessage response = udp.exchange(
+                            "udp.example.test", 443, UPSTREAM_UDP_REQUEST);
+                    require(Arrays.equals(UPSTREAM_UDP_RESPONSE, response.payload()),
+                            "authenticated SOCKS5 upstream UDP response was corrupted");
                 }
                 upstream.verify();
                 proxy.clearUpstream();
@@ -249,7 +323,7 @@ public final class RigelProxyCoreTest {
         System.out.println("Rigel proxy core checks passed: HTTP, blocked CONNECT,"
                 + " self-loop rejection, route resets, 65 destination-first tunnel"
                 + " retirements, direct UDP, SOCKS5 upstream UDP, TCP-only rejection,"
-                + " and fallback.");
+                + " authenticated HTTP/SOCKS5 upstreams, and fallback.");
     }
 
     private static HttpClient clientFor(int port) {
@@ -484,6 +558,13 @@ public final class RigelProxyCoreTest {
         byte[] bytes = input.readNBytes(length);
         if (bytes.length != length) throw new EOFException();
         return bytes;
+    }
+
+    private static boolean containsByte(byte[] bytes, byte value) {
+        for (byte b : bytes) {
+            if (b == value) return true;
+        }
+        return false;
     }
 
     private static String readHeaders(InputStream input) throws Exception {
@@ -797,10 +878,20 @@ public final class RigelProxyCoreTest {
         private final ServerSocket server;
         private final DatagramSocket relay;
         private final Thread worker;
+        private final String expectedUser;
+        private final String expectedPass;
         private final CountDownLatch packetSeen = new CountDownLatch(1);
         private volatile Throwable failure;
 
         MockSocks5UdpProxy() throws Exception {
+            this(null, null);
+        }
+
+        /** expectedUser non-null means the client must negotiate RFC 1929 with
+         *  exactly these credentials. */
+        MockSocks5UdpProxy(String expectedUser, String expectedPass) throws Exception {
+            this.expectedUser = expectedUser;
+            this.expectedPass = expectedPass;
             server = new ServerSocket(0, 1, LOOPBACK);
             relay = new DatagramSocket(new InetSocketAddress(LOOPBACK, 0));
             relay.setSoTimeout(5_000);
@@ -816,8 +907,25 @@ public final class RigelProxyCoreTest {
                 InputStream input = control.getInputStream();
                 require(readByte(input) == 0x05, "invalid upstream SOCKS5 greeting");
                 int methods = readByte(input);
-                readExact(input, methods);
-                control.getOutputStream().write(new byte[] {0x05, 0x00});
+                byte[] offered = readExact(input, methods);
+                if (expectedUser == null) {
+                    require(methods == 1 && offered[0] == 0x00,
+                            "anonymous SOCKS5 upstream got an unexpected auth offer");
+                    control.getOutputStream().write(new byte[] {0x05, 0x00});
+                } else {
+                    require(containsByte(offered, (byte) 0x02),
+                            "authenticated SOCKS5 upstream was not offered user/pass auth");
+                    control.getOutputStream().write(new byte[] {0x05, 0x02});
+                    control.getOutputStream().flush();
+                    require(readByte(input) == 0x01, "invalid RFC 1929 subnegotiation version");
+                    int userLength = readByte(input);
+                    String user = new String(readExact(input, userLength), StandardCharsets.UTF_8);
+                    int passLength = readByte(input);
+                    String pass = new String(readExact(input, passLength), StandardCharsets.UTF_8);
+                    require(expectedUser.equals(user) && expectedPass.equals(pass),
+                            "SOCKS5 upstream received the wrong credentials");
+                    control.getOutputStream().write(new byte[] {0x01, 0x00});
+                }
                 control.getOutputStream().flush();
 
                 require(readByte(input) == 0x05 && readByte(input) == 0x03,
@@ -869,6 +977,97 @@ public final class RigelProxyCoreTest {
             } catch (Exception ignored) {
             }
             relay.close();
+            try {
+                worker.join(2_000);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    /** SOCKS5 TCP upstream that demands RFC 1929 credentials, then acts as
+     *  the CONNECT destination's HTTP origin. Covers the LittleProxy chain's
+     *  username/password path (Netty's Socks5ProxyHandler) end to end. */
+    private static final class MockSocks5TcpProxy implements AutoCloseable {
+        private final ServerSocket server;
+        private final Thread worker;
+        private final String expectedUser;
+        private final String expectedPass;
+        private final CountDownLatch requestSeen = new CountDownLatch(1);
+        private volatile Throwable failure;
+
+        MockSocks5TcpProxy(String expectedUser, String expectedPass) throws Exception {
+            this.expectedUser = expectedUser;
+            this.expectedPass = expectedPass;
+            server = new ServerSocket(0, 1, LOOPBACK);
+            worker = Thread.ofPlatform().daemon(true).name("mock-socks5-tcp-upstream")
+                    .start(this::serve);
+        }
+
+        int port() { return server.getLocalPort(); }
+
+        private void serve() {
+            try (Socket connection = server.accept()) {
+                connection.setSoTimeout(5_000);
+                InputStream input = connection.getInputStream();
+                java.io.OutputStream output = connection.getOutputStream();
+                require(readByte(input) == 0x05, "invalid upstream SOCKS5 greeting");
+                int methods = readByte(input);
+                byte[] offered = readExact(input, methods);
+                require(containsByte(offered, (byte) 0x02),
+                        "authenticated SOCKS5 TCP upstream was not offered user/pass auth");
+                output.write(new byte[] {0x05, 0x02});
+                output.flush();
+                require(readByte(input) == 0x01, "invalid RFC 1929 subnegotiation version");
+                int userLength = readByte(input);
+                String user = new String(readExact(input, userLength), StandardCharsets.UTF_8);
+                int passLength = readByte(input);
+                String pass = new String(readExact(input, passLength), StandardCharsets.UTF_8);
+                require(expectedUser.equals(user) && expectedPass.equals(pass),
+                        "SOCKS5 TCP upstream received the wrong credentials");
+                output.write(new byte[] {0x01, 0x00});
+                output.flush();
+
+                require(readByte(input) == 0x05 && readByte(input) == 0x01,
+                        "upstream did not receive a SOCKS5 CONNECT");
+                readByte(input); // reserved
+                int addressType = readByte(input);
+                if (addressType == 0x01) readExact(input, 4);
+                else if (addressType == 0x04) readExact(input, 16);
+                else if (addressType == 0x03) readExact(input, readByte(input));
+                else throw new AssertionError("invalid upstream CONNECT address type");
+                readExact(input, 2);
+
+                ByteArrayOutputStream reply = new ByteArrayOutputStream();
+                reply.write(new byte[] {0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0});
+                output.write(reply.toByteArray());
+                output.flush();
+
+                readHeaders(input); // the forwarded HTTP request
+                byte[] body = "UPSTREAM_OK".getBytes(StandardCharsets.UTF_8);
+                String response = "HTTP/1.1 200 OK\r\nContent-Length: " + body.length
+                        + "\r\nConnection: close\r\n\r\n";
+                output.write(response.getBytes(StandardCharsets.ISO_8859_1));
+                output.write(body);
+                output.flush();
+                requestSeen.countDown();
+            } catch (Throwable error) {
+                failure = error;
+                requestSeen.countDown();
+            }
+        }
+
+        void verify() throws Exception {
+            require(requestSeen.await(5, TimeUnit.SECONDS),
+                    "SOCKS5 TCP upstream did not receive the forwarded request");
+            if (failure != null) throw new AssertionError("SOCKS5 TCP upstream failed", failure);
+        }
+
+        @Override public void close() {
+            try {
+                server.close();
+            } catch (Exception ignored) {
+            }
             try {
                 worker.join(2_000);
             } catch (InterruptedException interrupted) {
