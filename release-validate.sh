@@ -74,8 +74,8 @@ fi
 # 3. No dev/source files in zip root
 FORBIDDEN_ROOT=(*.md .gitignore .gitattributes *-build.json build.sh test.sh setup*.sh get_*.sh update_*.py make_portable.sh patch-*.sh)
 for pattern in "${FORBIDDEN_ROOT[@]}"; do
-    matches=("$ROOT"/$pattern)
-    if [[ -e "${matches[0]}" ]]; then
+    matches=("$ROOT"/${~pattern}(N))
+    if (( ${#matches[@]} > 0 )); then
         echo "FAIL: forbidden dev file in zip root: ${matches[0]}"
         exit 1
     fi
