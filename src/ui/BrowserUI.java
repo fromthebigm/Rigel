@@ -3467,6 +3467,7 @@ public class BrowserUI {
             }
         };
 
+        final String[] lastFingerprint = {""};
         Runnable refresh = () -> {
             if (table.isDisposed()) return;
             DownloadRecord selected = selectedRecord.get();
@@ -3474,6 +3475,22 @@ public class BrowserUI {
             synchronized (downloads) {
                 snapshot = new java.util.ArrayList<>(downloads);
             }
+            // Fingerprint: skip the table rebuild when nothing changed —
+            // the old code destroyed and recreated every TableItem twice a
+            // second while the dialog sat idle, churning allocations for no
+            // reason.
+            StringBuilder fp = new StringBuilder();
+            for (DownloadRecord record : snapshot) {
+                fp.append(record.status).append('\u0001')
+                   .append(record.name).append('\u0001')
+                   .append(record.path).append('\u0002');
+            }
+            String fingerprint = fp.toString();
+            if (fingerprint.equals(lastFingerprint[0])) {
+                updateButtons.run();
+                return;
+            }
+            lastFingerprint[0] = fingerprint;
             table.setRedraw(false);
             try {
                 table.removeAll();
