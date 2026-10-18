@@ -137,7 +137,6 @@ static NSString *BridgeScript(void) {
         "var k='';"
         "function r(){try{if(!T||!h.rigelEvent)return;var n=location.href+'\\n'+document.title;if(n===k)return;k=n;h.rigelEvent.postMessage(q(location.href)+'|'+q(document.title))}catch(e){}}"
         "if(T){var p=history.pushState,x=history.replaceState;history.pushState=function(){var v=p.apply(this,arguments);setTimeout(r);return v};history.replaceState=function(){var v=x.apply(this,arguments);setTimeout(r);return v};addEventListener('popstate',r);addEventListener('hashchange',r);addEventListener('DOMContentLoaded',function(){r();try{var t=document.querySelector('title')||document.head;t&&new MutationObserver(r).observe(t,{subtree:true,childList:true,characterData:true})}catch(e){}},{once:true})}"
-        "document.addEventListener('contextmenu',function(e){try{var n=location.hostname.toLowerCase();if(n==='chess.com'||n.endsWith('.chess.com'))e.preventDefault()}catch(x){}},true);"
         "document.addEventListener('keydown',function(e){if(e&&(/^Arrow(Up|Down|Left|Right)$/.test(e.key)||e.keyCode>36&&e.keyCode<41))window.__rigelLastRealArrowKeyTime=Date.now()},true)"
         "})();";
 }
