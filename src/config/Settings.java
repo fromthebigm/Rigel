@@ -151,6 +151,14 @@ public class Settings {
                 try (OutputStream out = Files.newOutputStream(temporary)) {
                     props.store(out, "Rigel browser settings");
                 }
+                // The settings file may contain upstream proxy credentials
+                // (proxy.pass) — lock it to the user, never world-readable.
+                try {
+                    Files.setPosixFilePermissions(temporary,
+                            java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"));
+                } catch (UnsupportedOperationException ignored) {
+                    // Non-POSIX filesystem; atomic write still applies.
+                }
             });
         } catch (IOException e) {
             System.err.println("[Rigel] Could not save settings: " + e.getMessage());
