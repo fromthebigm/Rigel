@@ -131,7 +131,15 @@ static bool bigm_gate_keychain_active(void) {
             (__bridge id)kSecAttrService: @(kBigmGateKcService),
             (__bridge id)kSecAttrAccount: @(kBigmGateKcAccount),
             (__bridge id)kSecAttrSynchronizable: (__bridge id)kCFBooleanFalse,
-            (__bridge id)kSecReturnData: @YES,
+            /* EXISTENCE probe, never a data read: asking for the secret
+             * bytes makes macOS ACL-check the caller and raise the
+             * "allow access / unlock" sheet (the recurring password prompt
+             * users reported) — and on some systems that dialog wedges the
+             * whole securityd UI lane. The marker's value is a constant,
+             * so its mere presence is the signal; UISkip stays as
+             * belt-and-braces for odd ACL shapes. */
+            (__bridge id)kSecUseAuthenticationUI:
+                (__bridge id)kSecUseAuthenticationUISkip,
         };
         CFTypeRef result = NULL;
         OSStatus status = SecItemCopyMatching((CFDictionaryRef)query, &result);
