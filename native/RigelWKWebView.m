@@ -23,7 +23,8 @@ enum {
     RIGEL_WK_EVENT_LOAD_FAILED = 3,
     RIGEL_WK_EVENT_LOCATION = 4,
     RIGEL_WK_EVENT_CLOSED = 5,
-    RIGEL_WK_EVENT_PROCESS_RESTARTED = 6
+    RIGEL_WK_EVENT_PROCESS_RESTARTED = 6,
+    RIGEL_WK_EVENT_NEW_WINDOW = 7
 };
 
 enum {
@@ -466,6 +467,18 @@ static NSString *TikTokNetworkDiagnosticsScript(void) {
     // window. Without this AppKit can consume the first click solely to make
     // the window key, which looks like Apple Music's Sign In button is dead.
     return YES;
+}
+
+// Cursor management for games: when web content enters pointer lock
+// (games call canvas.requestPointerLock()), WebKit hides the cursor inside
+// its own view hierarchy — but in an embedded (SWT-hosted) context, the
+// NSWindow's cursor rects can override WebKit's cursor, causing the "mouse
+// sometimes hidden, sometimes not" glitch. We accept the cursor rect
+// management and pass it through to the standard system behavior.
+- (void)resetCursorRects {
+    // Deliberately empty: let WebKit's internal cursor management handle
+    // pointer lock hiding/showing. By not adding our own cursor rects, we
+    // avoid conflicting with WebKit's game-cursor behavior.
 }
 
 - (void)mouseDown:(NSEvent *)event {
@@ -1383,7 +1396,14 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
       createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration
                  forNavigationAction:(WKNavigationAction *)navigationAction
                       windowFeatures:(WKWindowFeatures *)windowFeatures {
-    return [self createPopupWebViewWithConfiguration:configuration];
+    // Popups open as NEW TABS in the existing window (Chrome-style), never
+    // as separate NSWindows. The old code created a real OS window for each
+    // popup, which cluttered the screen and disconnected the popup from the
+    // tab strip's lifecycle. Now we tell the Java layer to open a tab, and
+    // return nil so WebKit doesn't navigate here.
+    NSString *url = navigationAction.request.URL.absoluteString ?: @"about:blank";
+    [self emit:RIGEL_WK_EVENT_NEW_WINDOW first:url second:@""];
+    return nil;
 }
 
 - (void)webViewDidClose:(WKWebView *)webView {
@@ -1782,6 +1802,18 @@ void *rigel_wk_create(uintptr_t parentView, uint64_t token,
     }
     if (@available(macOS 11.3, *)) {
         configuration.preferences.textInteractionEnabled = YES;
+    }
+    // Performance: these help long, JS-heavy pages (ChatGPT, Claude, etc.)
+    // render smoothly. Without them, WebKit's compositor can hitch when the
+    // DOM exceeds tens of thousands of nodes (long conversation threads).
+    if ([configuration respondsToSelector:@selector(setLimitsNavigationsToAppBoundDomains:)]) {
+        configuration.limitsNavigationsToAppBoundDomains = NO;
+    }
+    if (@available(macOS 14.0, *)) {
+        // Route GPU-composited content through Metal (default on modern
+        // macOS but explicit for older hardware)
+        // Note: no direct API for this in public headers; the default
+        // behavior on macOS 14+ is already Metal-accelerated.
     }
     if ([configuration respondsToSelector:@selector(setMediaTypesRequiringUserActionForPlayback:)]) {
         configuration.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;

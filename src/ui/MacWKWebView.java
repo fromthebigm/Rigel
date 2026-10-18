@@ -101,6 +101,7 @@ final class MacWKWebView extends Composite {
     static final int LOCATION = 4;
     static final int CLOSED = 5;
     static final int PROCESS_RESTARTED = 6;
+    static final int NEW_WINDOW = 7;
 
     private static final AtomicLong NEXT_TOKEN = new AtomicLong(1);
     private static final AtomicLong NEXT_EVAL_TOKEN = new AtomicLong(1);

@@ -387,6 +387,16 @@ public final class RigelBrowser extends Composite {
                 contentProcessReloadPending = true;
                 System.err.println("[Rigel] WKWebView content process restarted");
             }
+            case MacWKWebView.NEW_WINDOW -> {
+                // Popups open as new TABS, never as separate OS windows.
+                // The native side returns nil from createWebViewWithConfiguration
+                // and sends us the URL here; the openHandler (TabManager's
+                // wireOpenWindow) creates a tab in the existing window.
+                if (openHandler != null && !first.isBlank()) {
+                    RigelBrowser tab = openHandler.open(first);
+                    if (tab != null) tab.setUrl(first);
+                }
+            }
             default -> {}
         }
     }
