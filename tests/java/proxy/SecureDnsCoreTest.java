@@ -25,12 +25,15 @@ public final class SecureDnsCoreTest {
     public static void main(String[] args) throws Exception {
         try {
             runTests();
+            Odoh.vectorSelfCheck();
         } finally {
             SecureDns.BACKEND_OVERRIDE = null;
             SecureDns.setMode(SecureDns.Mode.SYSTEM);
         }
         System.out.println("SecureDns core checks passed: single-flight fan-out, "
                 + "TTL cache, rotation, NXDOMAIN negative cache, transport fallback cleanup");
+        System.out.println("ODoH HPKE self-check passed: RFC 9180 A.1.1 vectors "
+                + "(KEM, key schedule, seal, export) all match");
     }
 
     private static void runTests() throws Exception {

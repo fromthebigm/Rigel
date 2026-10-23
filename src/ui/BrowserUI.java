@@ -4363,6 +4363,7 @@ public class BrowserUI {
         Combo dnsCombo = new Combo(proxyPage, SWT.DROP_DOWN | SWT.READ_ONLY);
         dnsCombo.setItems(new String[] {
                 "Cloudflare (encrypted, 1.1.1.1)",
+                "Cloudflare Oblivious (relayed — nobody sees both you and your queries)",
                 "Google (encrypted, 8.8.8.8)",
                 "System (plain text)"});
         dnsCombo.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
@@ -4370,14 +4371,18 @@ public class BrowserUI {
         dnsCombo.setForeground(colAddrFg);
         int dnsIndex = switch (proxy.SecureDns.Mode.fromSetting(settings.getDnsMode())) {
             case CLOUDFLARE -> 0;
-            case GOOGLE -> 1;
-            case SYSTEM -> 2;
+            case OBLIVIOUS -> 1;
+            case GOOGLE -> 2;
+            case SYSTEM -> 3;
         };
         dnsCombo.select(dnsIndex);
         Label dnsNote = new Label(proxyPage, SWT.WRAP);
         dnsNote.setText(
                 "Encrypted DNS (DNS-over-HTTPS) keeps the names of the sites you visit "
-                + "out of plain-text network traffic. If the encrypted resolver is "
+                + "out of plain-text network traffic. Oblivious DNS goes further: "
+                + "queries are sealed to Cloudflare's public key and relayed through "
+                + "a public relay, so no single server ever sees both your IP address "
+                + "and what you looked up. If the encrypted resolver is "
                 + "unreachable Rigel falls back to system DNS and logs it.");
         dnsNote.setBackground(colNavBg);
         dnsNote.setForeground(colTextMuted);
@@ -4739,8 +4744,9 @@ public class BrowserUI {
                 default -> ProxyServer.UpstreamType.HTTP;
             };
             String dnsModeSetting = switch (dnsCombo.getSelectionIndex()) {
-                case 1 -> "google";
-                case 2 -> "system";
+                case 1 -> "oblivious";
+                case 2 -> "google";
+                case 3 -> "system";
                 default -> "cloudflare";
             };
             boolean av1CompatibilityChanged = settings.isAv1NormalizationAllSitesEnabled()

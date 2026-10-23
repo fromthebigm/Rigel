@@ -65,6 +65,14 @@ public final class SecureDns {
         SYSTEM,
         /** Cloudflare DoH at 1.1.1.1 / 1.0.0.1. */
         CLOUDFLARE,
+        /**
+         * Cloudflare Oblivious DoH (RFC 9230): queries are HPKE-sealed to
+         * the target's public key and relayed through a public relay, so
+         * the resolver never sees the client IP and the relay never sees
+         * the query. Falls back to plain Cloudflare DoH when the oblivious
+         * path fails, then to the system resolver.
+         */
+        OBLIVIOUS,
         /** Google DoH at 8.8.8.8 / 8.8.4.4. */
         GOOGLE;
 
@@ -364,15 +372,41 @@ public final class SecureDns {
         return new InetSocketAddress(all[0], port);
     }
 
-    /** RFC 8484 GET exchange against each endpoint until one succeeds. */
+    /** One family's exchange: ODoH when selected (plain DoH fallback),
+     *  otherwise RFC 8484 GET against each endpoint until one succeeds. */
     private static Response exchange(Mode active, String host, int type)
             throws Exception {
         byte[] query = encodeQuery(host, type);
+        if (active == Mode.OBLIVIOUS) {
+            try {
+                byte[] sealed = Odoh.query(query);
+                return decodeReply(query, sealed);
+            } catch (Exception odohFailure) {
+                // ODoH is a privacy upgrade, not a connectivity requirement:
+                // degrade to direct Cloudflare DoH (still encrypted off the
+                // local network) rather than to the plaintext resolver.
+                if (!odohFallbackLogged) {
+                    odohFallbackLogged = true;
+                    System.err.println("[Rigel] ODoH unavailable ("
+                            + odohFailure.getMessage()
+                            + "); using direct Cloudflare DoH until the"
+                            + " setting changes");
+                }
+                return dohExchange(CLOUDFLARE_ENDPOINTS, query);
+            }
+        }
+        String[] endpoints = active == Mode.GOOGLE
+                ? GOOGLE_ENDPOINTS : CLOUDFLARE_ENDPOINTS;
+        return dohExchange(endpoints, query);
+    }
+
+    private static volatile boolean odohFallbackLogged = false;
+
+    private static Response dohExchange(String[] endpoints, byte[] query)
+            throws Exception {
         String encoded = Base64.getUrlEncoder().withoutPadding()
                 .encodeToString(query);
         Exception last = null;
-        String[] endpoints = active == Mode.GOOGLE
-                ? GOOGLE_ENDPOINTS : CLOUDFLARE_ENDPOINTS;
         for (String endpoint : endpoints) {
             try {
                 HttpRequest request = HttpRequest.newBuilder()
