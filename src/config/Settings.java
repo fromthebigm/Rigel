@@ -64,6 +64,7 @@ public class Settings {
     private static final String K_GLASS_CHROME  = "appearance.glass.chrome";
     private static final String K_AV1_NORMALIZE_ALL = "media.av1.normalize.all-sites";
     private static final String K_WEB_INPUT_SITE_MODES = "input.web.site.modes";
+    private static final String K_DOMAIN_FRONTING = "proxy.domain.fronting";
 
     private final Properties props = new Properties();
     private int batchDepth;
@@ -228,6 +229,20 @@ public class Settings {
     }
     public String getUpstreamUser() { return props.getProperty(K_UPSTREAM_USER, ""); }
     public String getUpstreamPass() { return props.getProperty(K_UPSTREAM_PASS, ""); }
+
+    // ── Domain fronting (circumvent IP blocks) ─────────────────────────────
+
+    /** The persisted fronting list: "real|front" lines. */
+    public String getDomainFronting() {
+        return props.getProperty(K_DOMAIN_FRONTING, "");
+    }
+
+    public void setDomainFronting(String data) {
+        if (data == null || data.isBlank()) props.remove(K_DOMAIN_FRONTING);
+        else props.setProperty(K_DOMAIN_FRONTING, data);
+        save();
+    }
+
     public void setUpstream(String host, int port) {
         setUpstream("http", host, port);
     }

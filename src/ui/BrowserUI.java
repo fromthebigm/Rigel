@@ -4383,6 +4383,85 @@ public class BrowserUI {
         dnsNote.setForeground(colTextMuted);
         dnsNote.setLayoutData(new GridData(SWT.FILL, SWT.TOP, true, false));
 
+        sectionHeader(proxyPage, "Circumvent IP blocks (domain fronting)");
+        Label frontingNote = new Label(proxyPage, SWT.WRAP);
+        frontingNote.setText(
+                "Connect to a fronting domain on the same CDN and send the real Host "
+                + "header — the router sees the allowed domain's IP, the CDN routes "
+                + "to the real site. One domain per line: realhost.com or "
+                + "realhost.com|front.com (default front: cdnjs.cloudflare.com). "
+                + "Only works for sites behind CDNs (Cloudflare, Fastly, Akamai).");
+        frontingNote.setBackground(colNavBg);
+        frontingNote.setForeground(colTextMuted);
+        frontingNote.setLayoutData(new GridData(SWT.FILL, SWT.TOP, true, false));
+
+        Text frontingList = new Text(proxyPage,
+                SWT.MULTI | SWT.BORDER | SWT.V_SCROLL | SWT.WRAP);
+        frontingList.setText(settings.getDomainFronting().replace("\n", "\n"));
+        frontingList.setBackground(colAddrBg);
+        frontingList.setForeground(colAddrFg);
+        java.util.Map<String, String> frontingHint =
+                new java.util.HashMap<>();
+        frontingList.addFocusListener(new org.eclipse.swt.events.FocusAdapter() {
+            @Override public void focusGained(org.eclipse.swt.events.FocusEvent e) {
+                String current = frontingList.getText().trim();
+                if (current.isEmpty() && !frontingHint.containsKey("touched")) {
+                    frontingList.setText("# e.g. blocked-site.com\n"
+                            + "# or: blocked-site.com|cdnjs.cloudflare.com\n");
+                }
+            }
+            @Override public void focusLost(org.eclipse.swt.events.FocusEvent e) {
+                String current = frontingList.getText();
+                if (current.startsWith("# e.g.")) frontingList.setText("");
+            }
+        });
+        GridData frontingData = new GridData(SWT.FILL, SWT.CENTER, true, false);
+        frontingData.heightHint = 70;
+        frontingList.setLayoutData(frontingData);
+
+        Composite frontingButtons = new Composite(proxyPage, SWT.NONE);
+        frontingButtons.setBackground(colNavBg);
+        frontingButtons.setLayoutData(new GridData(SWT.FILL, SWT.TOP, true, false));
+        GridLayout fbLayout = new GridLayout(2, false);
+        fbLayout.marginWidth = 0; fbLayout.horizontalSpacing = 10;
+        frontingButtons.setLayout(fbLayout);
+        Button frontingApply = new Button(frontingButtons, SWT.PUSH);
+        frontingApply.setText("Apply fronting");
+        frontingApply.setBackground(colAddrBg);
+        frontingApply.setForeground(colAddrFg);
+        Button frontingClear = new Button(frontingButtons, SWT.PUSH);
+        frontingClear.setText("Clear");
+        frontingClear.setBackground(colAddrBg);
+        frontingClear.setForeground(colAddrFg);
+
+        frontingApply.addSelectionListener(new org.eclipse.swt.events.SelectionAdapter() {
+            @Override public void widgetSelected(org.eclipse.swt.events.SelectionEvent e) {
+                String data = frontingList.getText().trim();
+                // Strip comment lines
+                StringBuilder clean = new StringBuilder();
+                for (String line : data.split("\n")) {
+                    String trimmed = line.trim();
+                    if (trimmed.isEmpty() || trimmed.startsWith("#")) continue;
+                    clean.append(trimmed).append('\n');
+                }
+                settings.setDomainFronting(clean.toString());
+                proxy.DomainFronting.loadFrom(clean.toString());
+                System.out.println("[Rigel] Domain fronting: "
+                        + proxy.DomainFronting.entries().size() + " entries");
+            }
+        });
+        frontingClear.addSelectionListener(new org.eclipse.swt.events.SelectionAdapter() {
+            @Override public void widgetSelected(org.eclipse.swt.events.SelectionEvent e) {
+                frontingList.setText("");
+                settings.setDomainFronting("");
+                proxy.DomainFronting.clear();
+                System.out.println("[Rigel] Domain fronting cleared");
+            }
+        });
+
+        // Load current fronting state into the proxy
+        proxy.DomainFronting.loadFrom(settings.getDomainFronting());
+
         sectionHeader(proxyPage, "Upstream proxy");
         Composite proxyForm = new Composite(proxyPage, SWT.NONE);
         proxyForm.setBackground(colNavBg);

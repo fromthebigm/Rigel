@@ -149,34 +149,63 @@ public class ProxyServer {
                                     if (httpObject instanceof HttpRequest) {
                                         HttpRequest req = (HttpRequest) httpObject;
                                         String host = req.headers().get("Host");
-                                        // For HTTPS the first request is a CONNECT whose
-                                        // URI is the "host:port" authority; the Host header
-                                        // may be absent. Check both so HTTPS ad/tracker
-                                        // hosts are caught at tunnel-open, not just HTTP.
                                         boolean connect = HttpMethod.CONNECT.equals(req.method());
                                         boolean blocked = blocklist.isBlocked(host);
                                         if (!blocked && connect) {
                                             blocked = blocklist.isBlocked(req.uri());
                                         }
                                         if (blocked) {
-                                            // A CONNECT needs a non-2xx response or SOCKS clients
-                                            // will treat the blocked tunnel as established.
                                             HttpResponseStatus status = connect
                                                     ? HttpResponseStatus.FORBIDDEN
                                                     : HttpResponseStatus.NO_CONTENT;
                                             DefaultFullHttpResponse response =
                                                     new DefaultFullHttpResponse(
                                                             HttpVersion.HTTP_1_1, status);
-                                            // Connection: close for BOTH branches: a blocked
-                                            // request may still carry a body (POST beacons);
-                                            // answering early on a keep-alive connection risks
-                                            // the remaining body bytes being parsed as the
-                                            // next request line.
                                             response.headers().set(
                                                     HttpHeaderNames.CONTENT_LENGTH, 0);
                                             response.headers().set(HttpHeaderNames.CONNECTION,
                                                     HttpHeaderValues.CLOSE);
                                             return response;
+                                        }
+                                        // ── Domain fronting ─────────────────────
+                                        // For CONNECT tunnels to fronted domains,
+                                        // rewrite the tunnel target to the front
+                                        // host. The inner TLS session still targets
+                                        // the real host (SNI = real host from the
+                                        // browser), but LittleProxy opens the TCP
+                                        // connection to the FRONT host's IP — the
+                                        // router's IP block only sees the front
+                                        // domain's IP. The real Host header rides
+                                        // inside the tunnel.
+                                        if (connect) {
+                                            String tunnelHost = tunnelHost(req.uri());
+                                            if (DomainFronting.isFronted(tunnelHost)) {
+                                                String front = DomainFronting.frontHostFor(tunnelHost);
+                                                if (front != null) {
+                                                    int port = tunnelPort(req.uri());
+                                                    req.setUri(front + ":" + port);
+                                                    // Stash the real host so
+                                                    // proxyToServerRequest can
+                                                    // restore it in the Host header
+                                                    // after the tunnel is established.
+                                                    originalRequest.headers().set(
+                                                            "X-Rigel-Real-Host", tunnelHost);
+                                                    System.out.println("[Rigel fronting] "
+                                                            + tunnelHost + " → " + front);
+                                                }
+                                            }
+                                        } else if (host != null
+                                                && DomainFronting.isFronted(host)) {
+                                            // Plain HTTP: rewrite the Host header path
+                                            // through the front domain.
+                                            String front = DomainFronting.frontHostFor(host);
+                                            if (front != null) {
+                                                req.headers().set(
+                                                        "X-Rigel-Real-Host", host);
+                                                req.headers().set("Host", front);
+                                                System.out.println("[Rigel fronting http] "
+                                                        + host + " → " + front);
+                                            }
                                         }
                                     }
                                     return null; // null = allow request to proceed
@@ -185,6 +214,24 @@ public class ProxyServer {
                         }
                     })
                     .start();
+    }
+
+    /** Extract the host from a CONNECT "host:port" URI. */
+    private static String tunnelHost(String uri) {
+        if (uri == null) return null;
+        int colon = uri.lastIndexOf(':');
+        return colon > 0 ? uri.substring(0, colon) : uri;
+    }
+
+    /** Extract the port from a CONNECT "host:port" URI (default 443). */
+    private static int tunnelPort(String uri) {
+        if (uri == null) return 443;
+        try {
+            int colon = uri.lastIndexOf(':');
+            return colon > 0 ? Integer.parseInt(uri.substring(colon + 1)) : 443;
+        } catch (NumberFormatException e) {
+            return 443;
+        }
     }
 
     public synchronized void stop() {
