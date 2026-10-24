@@ -43,6 +43,12 @@ public final class BrowserApplication {
         RigelBrowser.configureContentBlocking(settings.isBlocklistEnabled());
         Blocklist blocklist = new Blocklist(settings.isBlocklistEnabled());
         proxy.SecureDns.setMode(proxy.SecureDns.Mode.fromSetting(settings.getDnsMode()));
+        // Domain fronting must be live before any CONNECT is dialed: the
+        // list persists in settings but was previously only loaded when the
+        // Network settings page was opened — a restart silently ran with
+        // fronting off. Load the saved map at startup, before the proxy
+        // accepts its first tunnel.
+        proxy.DomainFronting.loadFrom(settings.getDomainFronting());
         proxyServer = new ProxyServer(blocklist);
         try {
             proxyServer.start();

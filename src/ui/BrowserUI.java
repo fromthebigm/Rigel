@@ -4393,9 +4393,11 @@ public class BrowserUI {
         frontingNote.setText(
                 "Connect to a fronting domain on the same CDN and send the real Host "
                 + "header — the router sees the allowed domain's IP, the CDN routes "
-                + "to the real site. One domain per line: realhost.com or "
-                + "realhost.com|front.com (default front: cdnjs.cloudflare.com). "
-                + "Only works for sites behind CDNs (Cloudflare, Fastly, Akamai).");
+                + "to the real site. One domain per line: realhost.com|front.com. "
+                + "The front must sit on the SAME CDN as the blocked site "
+                + "(e.g. TikTok is on Akamai: front it via www.bing.com; "
+                + "Cloudflare sites can front via other Cloudflare sites). "
+                + "The status line below shows what is ACTIVE right now.");
         frontingNote.setBackground(colNavBg);
         frontingNote.setForeground(colTextMuted);
         frontingNote.setLayoutData(new GridData(SWT.FILL, SWT.TOP, true, false));
@@ -4439,6 +4441,24 @@ public class BrowserUI {
         frontingClear.setBackground(colAddrBg);
         frontingClear.setForeground(colAddrFg);
 
+        // Live activation status: reflects the proxy's ACTUAL in-memory map,
+        // not the text box — the answer to "did Apply actually do anything?"
+        Label frontingStatus = new Label(proxyPage, SWT.WRAP);
+        frontingStatus.setBackground(colNavBg);
+        frontingStatus.setForeground(colTextMuted);
+        frontingStatus.setLayoutData(new GridData(SWT.FILL, SWT.TOP, true, false));
+        Runnable refreshFrontingStatus = () -> {
+            var entries = proxy.DomainFronting.entries();
+            if (entries.isEmpty()) {
+                frontingStatus.setText("Fronting: OFF — no sites are being fronted.");
+            } else {
+                StringBuilder sb = new StringBuilder("Fronting: ACTIVE — ");
+                for (String entry : entries) sb.append(entry).append("; ");
+                frontingStatus.setText(sb.substring(0, sb.length() - 2));
+            }
+        };
+        refreshFrontingStatus.run();
+
         frontingApply.addSelectionListener(new org.eclipse.swt.events.SelectionAdapter() {
             @Override public void widgetSelected(org.eclipse.swt.events.SelectionEvent e) {
                 String data = frontingList.getText().trim();
@@ -4453,6 +4473,7 @@ public class BrowserUI {
                 proxy.DomainFronting.loadFrom(clean.toString());
                 System.out.println("[Rigel] Domain fronting: "
                         + proxy.DomainFronting.entries().size() + " entries");
+                refreshFrontingStatus.run();
             }
         });
         frontingClear.addSelectionListener(new org.eclipse.swt.events.SelectionAdapter() {
@@ -4461,6 +4482,7 @@ public class BrowserUI {
                 settings.setDomainFronting("");
                 proxy.DomainFronting.clear();
                 System.out.println("[Rigel] Domain fronting cleared");
+                refreshFrontingStatus.run();
             }
         });
 
