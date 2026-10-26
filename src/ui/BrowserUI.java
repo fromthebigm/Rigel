@@ -4393,10 +4393,10 @@ public class BrowserUI {
         frontingNote.setText(
                 "Connect to a fronting domain on the same CDN and send the real Host "
                 + "header — the router sees the allowed domain's IP, the CDN routes "
-                + "to the real site. One domain per line: realhost.com|front.com. "
-                + "The front must sit on the SAME CDN as the blocked site "
-                + "(e.g. TikTok is on Akamai: front it via www.bing.com; "
-                + "Cloudflare sites can front via other Cloudflare sites). "
+                + "to the real site. Paste the blocked domains (one per line) and "
+                + "click Auto-detect: Rigel reads each site's CNAME/CDN through the "
+                + "active resolver (ODoH included) and pairs it with a proven front "
+                + "(Akamai → bing, Cloudflare → chess.com, Fastly → python.org). "
                 + "The status line below shows what is ACTIVE right now.");
         frontingNote.setBackground(colNavBg);
         frontingNote.setForeground(colTextMuted);
@@ -4414,7 +4414,7 @@ public class BrowserUI {
                 String current = frontingList.getText().trim();
                 if (current.isEmpty() && !frontingHint.containsKey("touched")) {
                     frontingList.setText("# e.g. blocked-site.com\n"
-                            + "# or: blocked-site.com|cdnjs.cloudflare.com\n");
+                            + "# or: blocked-site.com|front.com\n");
                 }
             }
             @Override public void focusLost(org.eclipse.swt.events.FocusEvent e) {
@@ -4429,13 +4429,17 @@ public class BrowserUI {
         Composite frontingButtons = new Composite(proxyPage, SWT.NONE);
         frontingButtons.setBackground(colNavBg);
         frontingButtons.setLayoutData(new GridData(SWT.FILL, SWT.TOP, true, false));
-        GridLayout fbLayout = new GridLayout(2, false);
+        GridLayout fbLayout = new GridLayout(3, false);
         fbLayout.marginWidth = 0; fbLayout.horizontalSpacing = 10;
         frontingButtons.setLayout(fbLayout);
         Button frontingApply = new Button(frontingButtons, SWT.PUSH);
         frontingApply.setText("Apply fronting");
         frontingApply.setBackground(colAddrBg);
         frontingApply.setForeground(colAddrFg);
+        Button frontingDetect = new Button(frontingButtons, SWT.PUSH);
+        frontingDetect.setText("Auto-detect fronts");
+        frontingDetect.setBackground(colAddrBg);
+        frontingDetect.setForeground(colAddrFg);
         Button frontingClear = new Button(frontingButtons, SWT.PUSH);
         frontingClear.setText("Clear");
         frontingClear.setBackground(colAddrBg);
@@ -4458,6 +4462,63 @@ public class BrowserUI {
             }
         };
         refreshFrontingStatus.run();
+
+        frontingDetect.addSelectionListener(new org.eclipse.swt.events.SelectionAdapter() {
+            @Override public void widgetSelected(org.eclipse.swt.events.SelectionEvent e) {
+                // For every bare entry, work out which CDN the site sits on
+                // and pair it with a live-proven front on that same CDN.
+                // Detection queries go through the ACTIVE resolver mode —
+                // ODoH included, so the blocked names never hit plaintext
+                // DNS while being classified.
+                StringBuilder rebuilt = new StringBuilder();
+                java.util.List<String> detected = new java.util.ArrayList<>();
+                java.util.List<String> unknown = new java.util.ArrayList<>();
+                for (String line : frontingList.getText().split("\n")) {
+                    String trimmed = line.trim();
+                    if (trimmed.isEmpty() || trimmed.startsWith("#")) continue;
+                    if (trimmed.contains("|")) {
+                        rebuilt.append(trimmed).append('\n');
+                        continue;
+                    }
+                    proxy.FrontDetector.Result result =
+                            proxy.FrontDetector.detect(trimmed);
+                    if (result != null && result.front() != null) {
+                        rebuilt.append(trimmed).append('|')
+                               .append(result.front()).append('\n');
+                        detected.add(trimmed + " → " + result.cdn()
+                                + " (front: " + result.front() + ")");
+                    } else if (result != null) {
+                        unknown.add(trimmed + ": " + result.cdn()
+                                + " — no cross-site front exists");
+                    } else {
+                        unknown.add(trimmed + ": CDN not recognized — pick a front manually");
+                    }
+                }
+                frontingList.setText(rebuilt.toString());
+                if (!detected.isEmpty() || !unknown.isEmpty()) {
+                    StringBuilder sb = new StringBuilder();
+                    for (String d : detected) sb.append(d).append("; ");
+                    for (String u : unknown) sb.append(u).append("; ");
+                    System.out.println("[Rigel] front auto-detect: "
+                            + sb.substring(0, sb.length() - 2));
+                }
+                // Apply whatever we ended up with, so detection is
+                // one-click effective rather than two.
+                String data = rebuilt.toString().trim();
+                settings.setDomainFronting(data);
+                proxy.DomainFronting.loadFrom(data);
+                refreshFrontingStatus.run();
+                StringBuilder note = new StringBuilder();
+                for (String d : detected) note.append(d).append("; ");
+                for (String u : unknown) note.append(u).append("; ");
+                if (note.length() == 0) {
+                    frontingStatus.setText(
+                            "Fronting: nothing to detect — add bare domains first.");
+                } else {
+                    frontingStatus.setText(note.substring(0, note.length() - 2));
+                }
+            }
+        });
 
         frontingApply.addSelectionListener(new org.eclipse.swt.events.SelectionAdapter() {
             @Override public void widgetSelected(org.eclipse.swt.events.SelectionEvent e) {

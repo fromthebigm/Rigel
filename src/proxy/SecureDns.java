@@ -400,9 +400,35 @@ public final class SecureDns {
         return dohExchange(endpoints, query);
     }
 
+    /**
+     * Raw DNS reply bytes for a (host, type) through the <b>active</b>
+     * resolver mode — ODoH when selected — for callers that need records
+     * beyond A/AAAA (front detection reads CNAME chains). Never touches the
+     * plaintext system path on its own; a transport failure propagates.
+     */
+    static byte[] rawDnsReply(String host, int type) throws Exception {
+        byte[] query = encodeQuery(host, type);
+        Mode active = mode;
+        if (active == Mode.OBLIVIOUS) {
+            try {
+                return Odoh.query(query);
+            } catch (Exception odohFailure) {
+                return dohGet(CLOUDFLARE_ENDPOINTS, query);
+            }
+        }
+        return dohGet(active == Mode.GOOGLE
+                ? GOOGLE_ENDPOINTS : CLOUDFLARE_ENDPOINTS, query);
+    }
+
     private static volatile boolean odohFallbackLogged = false;
 
     private static Response dohExchange(String[] endpoints, byte[] query)
+            throws Exception {
+        return decodeReply(query, dohGet(endpoints, query));
+    }
+
+    /** RFC 8484 GET against each endpoint until one returns a body. */
+    private static byte[] dohGet(String[] endpoints, byte[] query)
             throws Exception {
         String encoded = Base64.getUrlEncoder().withoutPadding()
                 .encodeToString(query);
@@ -420,7 +446,7 @@ public final class SecureDns {
                 if (reply.statusCode() != 200) {
                     throw new IOException("DoH status " + reply.statusCode());
                 }
-                return decodeReply(query, reply.body());
+                return reply.body();
             } catch (Exception error) {
                 last = error;
             }

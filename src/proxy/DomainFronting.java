@@ -11,7 +11,7 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * Per-site list, managed through the UI. Each entry is a pair:
  *   real-host → front-host
- * e.g. "blocked-site.com → cdnjs.cloudflare.com"
+ * e.g. "blocked-site.com → chess.com"
  *
  * For HTTPS (CONNECT tunnels), the fronting happens at the TLS SNI level:
  * connect to the front host's IP, but the CONNECT tunnel targets the real
@@ -23,7 +23,13 @@ public final class DomainFronting {
     private static final ConcurrentHashMap<String, String> FRONTED = new ConcurrentHashMap<>();
 
     /** The default front domain: a widely-allowed Cloudflare-hosted site. */
-    private static final String DEFAULT_FRONT = "cdnjs.cloudflare.com";
+    /**
+     * Front used when an entry names no explicit front. chess.com is the
+     * live-proven Cloudflare front (cdnjs.cloudflare.com hits Cloudflare
+     * error 1034 "Edge IP Restricted" for some zones, so it was retired as
+     * the default); Auto-detect fills an explicit same-CDN front anyway.
+     */
+    private static final String DEFAULT_FRONT = "chess.com";
 
     private DomainFronting() {}
 
@@ -54,15 +60,30 @@ public final class DomainFronting {
 
     /** True if this real host has fronting enabled. */
     public static boolean isFronted(String host) {
-        if (host == null || host.isBlank()) return false;
-        String normalized = normalize(host);
-        return FRONTED.containsKey(normalized);
+        return frontHostFor(host) != null;
     }
 
-    /** Get the front domain for a real host. Null if not fronted. */
+    /**
+     * Get the front domain for a real host. Null if not fronted.
+     * Subdomains inherit: adding {@code tiktok.com} also fronts
+     * {@code www.tiktok.com} — the browser's CONNECT almost always uses
+     * the www form while humans type the bare domain, and a miss there
+     * meant the block still won. Exact entry wins over inherited.
+     */
     public static String frontHostFor(String realHost) {
         if (realHost == null || realHost.isBlank()) return null;
-        return FRONTED.get(normalize(realHost));
+        String host = normalize(realHost);
+        String front = FRONTED.get(host);
+        if (front != null) return front;
+        // Walk parent domains: www.tiktok.com → tiktok.com
+        int dot = host.indexOf('.');
+        while (dot > 0 && dot < host.length() - 1) {
+            host = host.substring(dot + 1);
+            front = FRONTED.get(host);
+            if (front != null) return front;
+            dot = host.indexOf('.');
+        }
+        return null;
     }
 
     /** Get all fronted hosts as a set of "real → front" strings. */
