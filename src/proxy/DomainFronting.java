@@ -22,7 +22,6 @@ public final class DomainFronting {
     /** realHost → frontHost */
     private static final ConcurrentHashMap<String, String> FRONTED = new ConcurrentHashMap<>();
 
-    /** The default front domain: a widely-allowed Cloudflare-hosted site. */
     /**
      * Front used when an entry names no explicit front. chess.com is the
      * live-proven Cloudflare front (cdnjs.cloudflare.com hits Cloudflare

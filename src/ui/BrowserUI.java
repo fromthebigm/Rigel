@@ -4404,7 +4404,7 @@ public class BrowserUI {
 
         Text frontingList = new Text(proxyPage,
                 SWT.MULTI | SWT.BORDER | SWT.V_SCROLL | SWT.WRAP);
-        frontingList.setText(settings.getDomainFronting().replace("\n", "\n"));
+        frontingList.setText(settings.getDomainFronting());
         frontingList.setBackground(colAddrBg);
         frontingList.setForeground(colAddrFg);
         java.util.Map<String, String> frontingHint =

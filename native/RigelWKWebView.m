@@ -1395,11 +1395,16 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
       createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration
                  forNavigationAction:(WKNavigationAction *)navigationAction
                       windowFeatures:(WKWindowFeatures *)windowFeatures {
-    // Popups open as NEW TABS in the existing window (Chrome-style), never
-    // as separate NSWindows. The old code created a real OS window for each
-    // popup, which cluttered the screen and disconnected the popup from the
-    // tab strip's lifecycle. Now we tell the Java layer to open a tab, and
-    // return nil so WebKit doesn't navigate here.
+    // Windowed popups (window.open with explicit size, OAuth/account
+    // choosers, media players) keep WebKit's native opener relationship and
+    // a real OS window. Tab-style popups (plain window.open without size)
+    // are handed to the Java layer as new tabs, matching Chrome's tab
+    // behavior and keeping the tab strip's lifecycle.
+    BOOL isWindowedPopup = (windowFeatures != nil
+            && (windowFeatures.width != nil || windowFeatures.height != nil));
+    if (isWindowedPopup) {
+        return [self createPopupWebViewWithConfiguration:configuration];
+    }
     NSString *url = navigationAction.request.URL.absoluteString ?: @"about:blank";
     [self emit:RIGEL_WK_EVENT_NEW_WINDOW first:url second:@""];
     return nil;
