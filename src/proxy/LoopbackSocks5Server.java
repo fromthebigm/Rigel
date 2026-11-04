@@ -195,7 +195,11 @@ public final class LoopbackSocks5Server implements AutoCloseable {
     private void handleConnect(Socket client, InputStream clientInput,
                                OutputStream clientOutput, Destination destination) {
         boolean connected = false;
-        try (Socket littleProxy = new Socket()) {
+        // Socket is closed explicitly further down (the bounded join path);
+        // keep one reference so both the try-with-targets and the timeout
+        // path release it the same way.
+        Socket littleProxy = new Socket();
+        try {
             if (destination.port() < 1) {
                 sendReply(clientOutput, STATUS_GENERAL_FAILURE, null, 0);
                 return;
@@ -243,7 +247,7 @@ public final class LoopbackSocks5Server implements AutoCloseable {
                 // out and exit; the client socket unwinds with it.
                 back.join(30_000);
                 if (back.isAlive()) {
-                    littleProxy.close();
+                    try { littleProxy.close(); } catch (IOException ignored) {}
                     back.join(5_000);
                 }
             } catch (InterruptedException interrupted) {
@@ -260,6 +264,8 @@ public final class LoopbackSocks5Server implements AutoCloseable {
                 System.err.println("[Rigel] SOCKS5 CONNECT failed for "
                         + destination.authority() + ": " + error.getMessage());
             }
+        } finally {
+            try { littleProxy.close(); } catch (IOException ignored) {}
         }
     }
 

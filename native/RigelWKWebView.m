@@ -864,6 +864,8 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
         window.title = @"Rigel";
         window.delegate = strongSelf;
         window.releasedWhenClosed = NO;
+        // Popup windows must get the same capture protection as the main
+        // window — without this an OAuth or sign-in popup was screen-visible.
         window.sharingType = DiagnosticCaptureEnabled()
             ? NSWindowSharingReadOnly
             : NSWindowSharingNone;
@@ -1631,14 +1633,12 @@ static NSString *RigelContentRuleJSON(void) {
             @"*2mdn.net",
             @"*adform.net",
             @"*adnxs.com",
-            @"*adservice.google.com",
             @"*ads-twitter.com",
             @"*adsafeprotected.com",
             @"*adsrvr.org",
             @"*adzerk.net",
             @"*advertising.com",
             @"*amazon-adsystem.com",
-            @"*analytics.google.com",
             @"*app-measurement.com",
             @"*bidswitch.net",
             @"*bluekai.com",
@@ -1652,10 +1652,6 @@ static NSString *RigelContentRuleJSON(void) {
             @"*everesttech.net",
             @"*eyeota.net",
             @"*flashtalking.com",
-            @"*google-analytics.com",
-            @"*googleadservices.com",
-            @"*googlesyndication.com",
-            @"*googletagservices.com",
             @"*hotjar.com",
             @"*imrworldwide.com",
             @"*krxd.net",
