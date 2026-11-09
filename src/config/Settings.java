@@ -95,7 +95,15 @@ public class Settings {
             }
             if (path.getFileName() != null && "classes".equals(path.getFileName().toString())
                     && path.getParent() != null) {
-                return path.getParent();
+                // Running from compiled classes: build/classes (new layout) or
+                // classes (legacy). The distribution root is the folder that
+                // holds portable-data/, i.e. the parent of build/ or classes/.
+                Path parent = path.getParent();
+                if (parent != null && "build".equals(parent.getFileName().toString())
+                        && parent.getParent() != null) {
+                    return parent.getParent();
+                }
+                return parent;
             }
             return path;
         } catch (Exception ignored) {
