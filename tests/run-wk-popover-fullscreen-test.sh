@@ -13,7 +13,7 @@ fi
 
 "$ROOT/build.sh"
 "$JAVA_HOME/bin/javac" -encoding UTF-8 -Xlint:all \
-  -cp "$ROOT/target/rigel.jar:$ROOT/lib/*" \
+  -cp "$ROOT/build/classes:$ROOT/lib/*" \
   -d "$OUT" "$ROOT/tests/java/ui/RigelWKPopoverFullscreenIntegrationTest.java"
 
 # Capture protection is part of this fullscreen regression. Do not inherit the
@@ -22,5 +22,5 @@ unset RIGEL_DIAGNOSTIC_CAPTURE
 "$JAVA_HOME/bin/java" \
   -XstartOnFirstThread \
   -Drigel.root="$ROOT" \
-  -cp "$OUT:$ROOT/target/rigel.jar:$ROOT/lib/*" \
+  -cp "$OUT:$ROOT/build/classes:$ROOT/lib/*" \
   ui.RigelWKPopoverFullscreenIntegrationTest

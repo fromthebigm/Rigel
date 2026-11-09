@@ -10,7 +10,6 @@ elif command -v /usr/libexec/java_home >/dev/null 2>&1; then
   JAVA_HOME="$(/usr/libexec/java_home 2>/dev/null || true)"
 fi
 BUILD_DIR="$ROOT/build/classes"
-JAR_TMP="$ROOT/target/rigel.jar.tmp"
 
 if [[ -z "${JAVA_HOME:-}" || ! -x "$JAVA_HOME/bin/javac" ]]; then
   print -u2 "No JDK found. Add the bundled jdk/ folder or set JAVA_HOME."
@@ -47,19 +46,10 @@ cp "$ROOT/resources/weather-icon.png" "$BUILD_DIR/"
 cp "$ROOT/resources/anchor-polyfill.js" "$BUILD_DIR/"
 cp "$ROOT/resources/anchor-polyfill.LICENSE.txt" "$BUILD_DIR/"
 
-if [[ ! -f "$ROOT/target/MANIFEST.MF" ]]; then
-  # Fresh checkouts do not carry target/ (gitignored); a runbook manifest is
-  # enough because run-rigel.sh puts lib/* on the classpath explicitly.
-  mkdir -p "$ROOT/target"
-  print 'Manifest-Version: 1.0' > "$ROOT/target/MANIFEST.MF"
-fi
-
-rm -f "$JAR_TMP"
-"$JAVA_HOME/bin/jar" --create \
-  --file "$JAR_TMP" \
-  --manifest "$ROOT/target/MANIFEST.MF" \
-  -C "$BUILD_DIR" .
-mv -f "$JAR_TMP" "$ROOT/target/rigel.jar"
+# Rigel runs directly from compiled classes (no jar). build/classes is the
+# runtime classpath root; resources and the native bridge dylib are copied
+# in alongside so Class.getResourceAsStream() resolves them at runtime.
+mkdir -p "$ROOT/build/classes"
 
 # Update identity: release tag (or a date-based default for local builds) and
 # the UTC build date. The updater compares these against GitHub releases.
@@ -69,4 +59,4 @@ RELEASE_TAG="${RELEASE_TAG:-portable-$(date -u '+%Y.%m.%d')}"
   date -u '+%Y-%m-%d'
 } > "$ROOT/version.txt"
 
-print "Built $ROOT/target/rigel.jar with the bundled JDK."
+print "Built $ROOT/build/classes with the bundled JDK (run by classes, no jar)."

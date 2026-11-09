@@ -27,7 +27,7 @@ not track that large JDK bundle; source checkouts can provide `jdk/`, set
 Or run the same command directly:
 
 ```bash
-./jdk/Contents/Home/bin/java -XstartOnFirstThread -cp "./target/rigel.jar:./lib/*" RigelApp
+./jdk/Contents/Home/bin/java -XstartOnFirstThread -cp "./build/classes:./lib/*" RigelApp
 ```
 
 The original SWT renderer is still available only as an explicit override.

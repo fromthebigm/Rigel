@@ -68,5 +68,5 @@ exec "$JAVA" \
   -XX:ErrorFile="$DIR/portable-data/profile/hs_err_pid%p.log" \
   -Drigel.root="$DIR" \
   -Xdock:icon="$DIR/Weather.icns" \
-  -cp "$DIR/target/rigel.jar:$DIR/lib/*" \
+  -cp "$DIR/build/classes:$DIR/lib/*" \
   RigelApp "$@"

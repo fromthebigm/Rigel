@@ -1,8 +1,6 @@
 import java.io.InputStream;
 import java.nio.file.Path;
 
-import com.sun.jna.Library;
-import com.sun.jna.Native;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.widgets.TaskBar;
 import org.eclipse.swt.widgets.TaskItem;
@@ -11,12 +9,6 @@ import org.eclipse.swt.widgets.Shell;
 import ui.BrowserApplication;
 
 public class RigelApp {
-    private interface DockIdentity extends Library {
-        void rigel_install_dock_identity(String bundlePath);
-    }
-
-    private static DockIdentity dockIdentity;
-
     /** First http/https-ish argv, for launcher deep links ("open THIS page").
      *  A bare host gets an https scheme; anything else is not a URL arg. */
     private static String pickUrlArg(String[] args) {
@@ -31,19 +23,19 @@ public class RigelApp {
     }
 
     public static void main(String[] args) {
-        try {
-            Path root = Path.of(System.getProperty("rigel.root", ".")).toAbsolutePath();
-            dockIdentity = Native.load(root.resolve("dock_identity.dylib").toString(), DockIdentity.class);
-            dockIdentity.rigel_install_dock_identity(root.resolve("Weather.app").toString());
-        } catch (Throwable ignored) {
-        }
+        // The dock-identity dylib (presentation swizzling + BigM product-key
+        // gate) is no longer loaded. Rigel now runs from plain classes with
+        // no native identity shim: the Java/SWT identity settings below carry
+        // the "Google Chrome" presentation name, and the dock icon is applied
+        // through SWT's TaskBar API. The adaptive light/dark dock icon and the
+        // standalone product-key gate are intentionally dropped with the dylib.
         System.setProperty("apple.awt.application.name", "Google Chrome");
         Display.setAppName("Google Chrome");
         Display.setAppVersion("1.0");
         Display display = new Display();
         Image dockIcon = null;
         try {
-                try (InputStream stream = RigelApp.class.getResourceAsStream("/weather-icon.png")) {
+            try (InputStream stream = RigelApp.class.getResourceAsStream("/weather-icon.png")) {
                 if (stream != null) {
                     dockIcon = new Image(display, stream);
                     TaskBar taskBar = display.getSystemTaskBar();
