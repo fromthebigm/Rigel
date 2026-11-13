@@ -152,11 +152,6 @@ public final class LocalOriginServer {
                 return;
             }
 
-            Headers inHeaders = exchange.getRequestHeaders();
-            String upgradeHeader = inHeaders.getFirst("Upgrade");
-            boolean websocket = upgradeHeader != null
-                    && upgradeHeader.equalsIgnoreCase("websocket");
-
             String upstreamPath = target.path;
             if (query != null && !query.isEmpty()) upstreamPath += "?" + query;
 
@@ -177,11 +172,6 @@ public final class LocalOriginServer {
                 return;
             }
 
-            if (websocket) {
-                proxyWebSocket(exchange, socket, target.host, upstreamPath, query);
-                return;
-            }
-
             try (socket) {
                 socket.setSoTimeout(READ_TIMEOUT_MS);
                 OutputStream upstreamOut = socket.getOutputStream();
@@ -190,9 +180,9 @@ public final class LocalOriginServer {
                 StringBuilder head = new StringBuilder();
                 head.append(method).append(' ').append(upstreamPath).append(" HTTP/1.1\r\n");
                 head.append("Host: ").append(target.host).append("\r\n");
+                Headers inHeaders = exchange.getRequestHeaders();
                 List<String> skip = List.of("host", "connection", "proxy-connection",
-                        "transfer-encoding", "keep-alive", "origin", "referer",
-                        "accept-encoding");
+                        "transfer-encoding", "keep-alive", "origin", "referer");
                 for (String name : inHeaders.keySet()) {
                     if (skip.contains(name.toLowerCase())) continue;
                     for (String value : inHeaders.get(name)) {
@@ -207,7 +197,6 @@ public final class LocalOriginServer {
                 if (referer != null && !referer.isBlank()) {
                     head.append("Referer: ").append(rewriteLocalOriginToReal(referer, target.host)).append("\r\n");
                 }
-                head.append("Accept-Encoding: identity\r\n");
                 head.append("Connection: close\r\n");
 
                 java.io.ByteArrayOutputStream reqBuf = new java.io.ByteArrayOutputStream();
@@ -238,7 +227,6 @@ public final class LocalOriginServer {
                 int contentLength = -1;
                 boolean chunked = false;
                 String contentType = "";
-                String contentEncoding = "";
                 List<String[]> headerLines = new ArrayList<>();
                 String line;
                 while ((line = readLine(upstreamIn)) != null && !line.isEmpty()) {
@@ -259,7 +247,6 @@ public final class LocalOriginServer {
                         catch (NumberFormatException ignored) {}
                     }
                     if (lower.equals("content-type")) contentType = value;
-                    if (lower.equals("content-encoding")) contentEncoding = value;
                     if (lower.equals("location")) {
                         value = mapRealUrlToLocal(value, port);
                     }
@@ -269,19 +256,8 @@ public final class LocalOriginServer {
                 boolean text = isTextContentType(contentType);
                 InputStream bodyStream = upstreamIn;
                 if (chunked) bodyStream = new ChunkedInputStream(upstreamIn);
-                if (text && (contentEncoding.contains("gzip") || contentEncoding.contains("deflate"))) {
-                    try {
-                        if (contentEncoding.contains("gzip")) {
-                            bodyStream = new java.util.zip.GZIPInputStream(bodyStream);
-                        } else {
-                            bodyStream = new java.util.zip.InflaterInputStream(bodyStream,
-                                    new java.util.zip.Inflater(true));
-                        }
-                    } catch (Exception ignored) {}
-                }
 
                 if (text) {
-                    respHeaders.remove("Content-Encoding");
                     java.io.ByteArrayOutputStream bufOut = new java.io.ByteArrayOutputStream();
                     byte[] b = new byte[64 * 1024];
                     int total = 0;
@@ -470,104 +446,14 @@ public final class LocalOriginServer {
         while (m.find()) {
             String h = m.group(1);
             String path = m.group(2);
-            if (path == null) path = "";
             if (h.startsWith("www.")) {
-                m.appendReplacement(sb, Matcher.quoteReplacement(path.isEmpty() ? "/" : path));
+                m.appendReplacement(sb, Matcher.quoteReplacement(path));
             } else {
                 m.appendReplacement(sb, Matcher.quoteReplacement("/cdn/" + h + path));
             }
         }
         m.appendTail(sb);
         return sb.toString();
-    }
-
-    private void proxyWebSocket(HttpExchange exchange, Socket socket, String host, String upstreamPath, String query) {
-        try {
-            OutputStream upOut = socket.getOutputStream();
-            InputStream upIn = socket.getInputStream();
-            String path = upstreamPath;
-            if (query != null && !query.isEmpty()) path += "?" + query;
-
-            Headers inHeaders = exchange.getRequestHeaders();
-            StringBuilder head = new StringBuilder();
-            head.append("GET ").append(path).append(" HTTP/1.1\r\n");
-            head.append("Host: ").append(host).append("\r\n");
-            // The target host is not in scope here; callers should pass it. Use exchange? fallback.
-            // (This path is best-effort; full host context is handled by caller if needed.)
-            head.append("Connection: Upgrade\r\n");
-            for (String name : inHeaders.keySet()) {
-                String lower = name.toLowerCase();
-                if (lower.equals("host") || lower.equals("connection")) continue;
-                for (String value : inHeaders.get(name)) {
-                    head.append(name).append(": ").append(value).append("\r\n");
-                }
-            }
-            head.append("\r\n");
-            upOut.write(head.toString().getBytes(StandardCharsets.ISO_8859_1));
-            upOut.flush();
-
-            String statusLine = readLine(upIn);
-            if (statusLine == null || statusLine.isEmpty()) {
-                sendError(exchange, 502, "Empty upstream response");
-                return;
-            }
-            String[] parts = statusLine.split(" ", 3);
-            int statusCode;
-            try { statusCode = Integer.parseInt(parts[1]); }
-            catch (Exception e) { statusCode = 502; }
-
-            Headers respHeaders = exchange.getResponseHeaders();
-            String line;
-            while ((line = readLine(upIn)) != null && !line.isEmpty()) {
-                int colon = line.indexOf(':');
-                if (colon < 0) continue;
-                String name = line.substring(0, colon).trim();
-                String value = line.substring(colon + 1).trim();
-                String lower = name.toLowerCase();
-                if (lower.equals("transfer-encoding") || lower.equals("connection")) continue;
-                respHeaders.add(name, value);
-            }
-            respHeaders.add("Connection", "Upgrade");
-            exchange.sendResponseHeaders(statusCode, 0);
-
-            if (statusCode == 101) {
-                OutputStream clientOut = exchange.getResponseBody();
-                InputStream clientIn = exchange.getRequestBody();
-                Thread back = new Thread(() -> copyStream(upIn, clientOut));
-                back.setDaemon(true);
-                back.start();
-                copyStream(clientIn, upOut);
-                try { upOut.close(); } catch (Exception ignored) {}
-                try { back.join(10_000); } catch (InterruptedException ignored) {}
-            } else {
-                // Stream any body through.
-                try (OutputStream out = exchange.getResponseBody()) {
-                    byte[] b = new byte[64 * 1024];
-                    int n;
-                    while ((n = upIn.read(b)) >= 0) {
-                        out.write(b, 0, n);
-                        out.flush();
-                    }
-                }
-            }
-        } catch (Exception e) {
-            try { sendError(exchange, 502, "WebSocket proxy error: " + e.getMessage()); } catch (Exception ignored) {}
-        } finally {
-            try { socket.close(); } catch (Exception ignored) {}
-            try { exchange.close(); } catch (Exception ignored) {}
-        }
-    }
-
-    private static void copyStream(InputStream in, OutputStream out) {
-        try {
-            byte[] b = new byte[64 * 1024];
-            int n;
-            while ((n = in.read(b)) >= 0) {
-                out.write(b, 0, n);
-                out.flush();
-            }
-        } catch (Exception ignored) {
-        }
     }
 
     private void sendError(HttpExchange exchange, int code, String message) {
