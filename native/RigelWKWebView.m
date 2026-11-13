@@ -117,28 +117,6 @@ static WKNavigationActionPolicy InBrowserPolicyForURL(NSURL *url) {
         : WKNavigationActionPolicyAllow;
 }
 
-static int RigelLocalOriginPort = 47653;
-
-static NSURL *RigelLocalOriginURLForURL(NSURL *url) {
-    if (url == nil) return nil;
-    NSString *scheme = url.scheme.lowercaseString;
-    if (![scheme isEqualToString:@"http"] && ![scheme isEqualToString:@"https"]) return nil;
-    NSString *host = url.host;
-    if (host == nil || host.length == 0) return nil;
-    if ([host isEqualToString:@"127.0.0.1"] || [host isEqualToString:@"localhost"]) return nil;
-    NSString *path = url.path;
-    if (path == nil || path.length == 0) path = @"/";
-    NSString *tail = path;
-    if (url.query != nil && url.query.length > 0) tail = [tail stringByAppendingFormat:@"?%@", url.query];
-    if (url.fragment != nil && url.fragment.length > 0) tail = [tail stringByAppendingFormat:@"#%@", url.fragment];
-    NSString *localPath = tail;
-    if (![host hasPrefix:@"www."]) {
-        localPath = [NSString stringWithFormat:@"/cdn/%@%@", host, tail];
-    }
-    NSString *localString = [NSString stringWithFormat:@"http://127.0.0.1:%d%@", RigelLocalOriginPort, localPath];
-    return [NSURL URLWithString:localString];
-}
-
 static NSString *BridgeScript(void) {
     return @"(function(){"
         "if(window.__rigelNativeBridge)return;"
@@ -1172,16 +1150,6 @@ static NSURL *UniqueDownloadURL(NSURL *directory, NSString *fileName) {
         decisionHandler(InBrowserPolicyForURL(url));
         return;
     }
-    NSURL *localURL = RigelLocalOriginURLForURL(url);
-    if (localURL != nil) {
-        // Rewrite real-host navigations to the local origin and cancel the
-        // original. Catches location.href and JS redirects too.
-        decisionHandler(WKNavigationActionPolicyCancel);
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [webView loadRequest:[NSURLRequest requestWithURL:localURL]];
-        });
-        return;
-    }
     if (![self shouldAllowNavigationToURL:navigationAction.request.URL]) {
         decisionHandler(WKNavigationActionPolicyCancel);
         return;
@@ -1792,11 +1760,6 @@ void rigel_wk_set_proxy_port(int proxyPort) {
 __attribute__((visibility("default")))
 void rigel_wk_set_proxy(int proxyPort, int proxyMode) {
     ConfigureProxy([WKWebsiteDataStore defaultDataStore], proxyPort, proxyMode);
-}
-
-__attribute__((visibility("default")))
-void rigel_wk_set_origin_port(int originPort) {
-    if (originPort > 0) RigelLocalOriginPort = originPort;
 }
 
 __attribute__((visibility("default")))
