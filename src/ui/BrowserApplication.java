@@ -6,6 +6,7 @@ import config.Settings;
 import org.eclipse.swt.widgets.Display;
 import proxy.Blocklist;
 import proxy.ProxyServer;
+import proxy.LocalOriginServer;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -18,6 +19,7 @@ public final class BrowserApplication {
     private final History history = new History();
     private final List<BrowserUI> windows = new ArrayList<>();
     private ProxyServer proxyServer;
+    private LocalOriginServer localOriginServer;
     private boolean quitting;
     /** Last time a cookie snapshot was successfully written (main-thread
      *  autosave or clean quit). The TERM-path save must not run when one of
@@ -49,6 +51,9 @@ public final class BrowserApplication {
         // fronting off. Load the saved map at startup, before the proxy
         // accepts its first tunnel.
         proxy.DomainFronting.loadFrom(settings.getDomainFronting());
+        localOriginServer = new LocalOriginServer();
+        localOriginServer.start();
+        MacWKWebView.setOriginPort(localOriginServer.getPort());
         proxyServer = new ProxyServer(blocklist);
         try {
             proxyServer.start();
@@ -81,6 +86,7 @@ public final class BrowserApplication {
             }
         } finally {
             saveCookies();
+            if (localOriginServer != null) localOriginServer.stop();
             if (proxyServer != null) proxyServer.stop();
         }
     }

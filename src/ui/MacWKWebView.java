@@ -91,6 +91,7 @@ final class MacWKWebView extends Composite {
         int rigel_wk_edit_action(Pointer handle, int action);
         void rigel_wk_execute(Pointer handle, String javascript);
         int rigel_wk_add_user_script(Pointer handle, String javascript, int mainFrameOnly);
+        void rigel_wk_set_origin_port(int originPort);
         void rigel_wk_evaluate(Pointer handle, String javascript, long evalToken,
                                EvalCallback callback);
     }
@@ -133,6 +134,7 @@ final class MacWKWebView extends Composite {
     private static volatile Throwable loadFailure;
     private static volatile boolean normalizeAv1AllSites;
     private static volatile boolean contentBlockingEnabled;
+    private static volatile int originPort;
 
     private final Delegate delegate;
     private final long token;
@@ -164,6 +166,14 @@ final class MacWKWebView extends Composite {
             if (failure instanceof RuntimeException runtime) throw runtime;
             if (failure instanceof Error error) throw error;
             throw new IllegalStateException("Could not create WKWebView", failure);
+        }
+
+        if (originPort > 0) {
+            try {
+                bridge().rigel_wk_add_user_script(handle,
+                        proxy.LocalOriginServer.documentStartScript(originPort), 0);
+            } catch (Throwable ignored) {
+            }
         }
 
         addControlListener(new ControlAdapter() {
@@ -217,6 +227,16 @@ final class MacWKWebView extends Composite {
             });
         }
     }
+
+    static void setOriginPort(int port) {
+        originPort = Math.max(0, port);
+        try {
+            bridge().rigel_wk_set_origin_port(originPort);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    static int getOriginPort() { return originPort; }
 
     static String failureReason() {
         Throwable failure = loadFailure;

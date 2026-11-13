@@ -157,6 +157,23 @@ public final class SecureDns {
 
     public static Mode getMode() { return mode; }
 
+    /**
+     * Resolve {@code host} using an explicitly requested mode without
+     * permanently changing the process-wide resolver mode. Used by the
+     * local-origin fetch mode to force a DoH lookup when the system
+     * resolver returns a sink address (146.112.0.0/16).
+     */
+    public static InetSocketAddress resolveWithMode(Mode requested, String host, int port)
+            throws UnknownHostException {
+        Mode saved = mode;
+        mode = requested == null ? Mode.CLOUDFLARE : requested;
+        try {
+            return resolve(host, port);
+        } finally {
+            mode = saved;
+        }
+    }
+
     public static void setMode(Mode next) {
         mode = Objects.requireNonNull(next, "mode");
         CACHE.clear();
