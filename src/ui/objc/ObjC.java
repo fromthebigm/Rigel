@@ -171,6 +171,16 @@ public final class ObjC {
         } catch (Throwable t) { throw new RuntimeException(t); }
     }
 
+    public static void callVoidPathBool(MemorySegment receiver, String selector,
+                                        MemorySegment path, boolean value) {
+        try {
+            MethodHandle h = LINKER.downcallHandle(MSG_SEND,
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, ValueLayout.JAVA_BOOLEAN));
+            h.invoke(receiver, sel(selector), path, value);
+        } catch (Throwable t) { throw new RuntimeException(t); }
+    }
+
     public static void callVoidBool(MemorySegment receiver, String selector, boolean value) {
         try {
             MethodHandle h = LINKER.downcallHandle(MSG_SEND,

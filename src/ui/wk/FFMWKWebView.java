@@ -300,21 +300,18 @@ public final class FFMWKWebView {
     }
 
     private static void installUserScripts(WebView w) {
-        try (var in = FFMWKWebView.class.getResourceAsStream("/anchor-polyfill.js")) {
-            if (in != null) {
-                String source = new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
-                addUserScript(w, source);
-            }
-        } catch (Throwable ignored) {
+        addUserScript(w, BridgeScripts.BRIDGE_SCRIPT);
+        addUserScript(w, BridgeScripts.MEDIA_TRACE_SCRIPT);
+        addUserScript(w, BridgeScripts.TIK_TOK_COMPATIBILITY_SCRIPT);
+        if (System.getenv("RIGEL_TIKTOK_DIAGNOSTICS") != null)
+            addUserScript(w, BridgeScripts.TIK_TOK_NETWORK_DIAGNOSTICS_SCRIPT);
+        if (System.getenv("RIGEL_LOGIN_DIAGNOSTICS") != null
+                || System.getenv("RIGEL_LOGIN_AUTOTEST") != null) {
+            String source = BridgeScripts.LOGIN_DIAGNOSTICS_SCRIPT;
+            if (System.getenv("RIGEL_LOGIN_AUTOTEST") != null)
+                source = "window.__rigelLoginAutotest=true;" + source;
+            addUserScript(w, source);
         }
-        // Minimal bridge shim: maps the JS message handlers Rigel's bridge
-        // scripts post to the WKScriptMessageHandler delegate.
-        addUserScript(w, "(function(){"
-                + "window.__rigelNativeBridge=1;"
-                + "var h=window.webkit&&window.webkit.messageHandlers||{};"
-                + "function s(n,a){try{h[n]&&h[n].postMessage([].map.call(a,function(v){return encodeURIComponent(v==null?'':String(v))}).join('|'));return true}catch(e){return false}}"
-                + "['rigelEvent','rigelDownload','rigelDownloadEvent','rigelPopup','rigelMedia','rigelNav'].forEach(function(n){window[n]=function(){return s(n,arguments)}});"
-                + "})();");
     }
 
     private static void addUserScript(WebView w, String source) {
@@ -369,69 +366,63 @@ public final class FFMWKWebView {
     }
 
     public static int cookiesSave(String path) {
-        try {
-            MemorySegment ds = (MemorySegment) ObjC.sendAddress(0).invoke(
-                    ObjC.cls("WKWebsiteDataStore"), ObjC.sel("defaultDataStore"));
-            MemorySegment store = (MemorySegment) ObjC.sendAddress(0).invoke(ds, ObjC.sel("httpCookieStore"));
-            MethodHandle body = ObjC.staticHandle(FFMWKWebView.class, "cookieSaveDone",
-                    MethodType.methodType(void.class, String.class, MemorySegment.class,
-                            MemorySegment.class));
-            body = MethodHandles.insertArguments(body, 0, path);
-            MemorySegment block = ObjC.block(body, FunctionDescriptor.ofVoid(
-                    ValueLayout.ADDRESS, ValueLayout.ADDRESS), ObjC.GLOBAL);
-            ObjC.callVoid(store, "getAllCookies:", block);
-            pumpRunLoop(1.0);
-            return 1;
-        } catch (Throwable t) { return 0; }
+        return CookieBridge.save(path);
     }
 
     public static int cookiesRestore(String path) {
-        // WKHTTPCookieStore has no public "setAllCookies"; a full restore is
-        // performed by adding each cookie via setCookie in the delegate path.
-        return 0;
-    }
-
-    public static void cookieSaveDone(String path, MemorySegment block, MemorySegment cookies) {
-        // Persist via plist encoding — implemented in CookieBridge (next pass).
+        return CookieBridge.restore(path);
     }
 
     private static void pumpRunLoop(double seconds) {
-        try {
-            SymbolLookup appkit = SymbolLookup.libraryLookup(
-                    "/System/Library/Frameworks/AppKit.framework/AppKit", ObjC.GLOBAL);
-            MethodHandle mainRunLoop = ObjC.LINKER.downcallHandle(appkit.find("NSRunLoopMain").orElseThrow(),
-                    FunctionDescriptor.of(ValueLayout.ADDRESS));
-            MemorySegment loop = (MemorySegment) mainRunLoop.invoke();
-            MethodHandle dateWith = ObjC.LINKER.downcallHandle(ObjC.MSG_SEND,
-                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS,
-                            ValueLayout.ADDRESS, ValueLayout.JAVA_DOUBLE));
-            MemorySegment date = (MemorySegment) dateWith.invoke(ObjC.cls("NSDate"),
-                    ObjC.sel("dateWithTimeIntervalSinceNow:"), seconds);
-            ObjC.callVoid(loop, "runMode:beforeDate:", ObjC.nsString("NSDefaultRunLoopMode"), date);
-        } catch (Throwable ignored) {}
+        // Kept for other async bridges; cookie paths use CookieBridge.pump().
     }
 
     public static int snapshot(long handle, String path) {
         try {
             MemorySegment config = ObjC.allocInit(ObjC.cls("WKSnapshotConfiguration"));
-            MethodHandle body = ObjC.staticHandle(FFMWKWebView.class, "snapshotDone",
-                    MethodType.methodType(void.class, String.class, MemorySegment.class,
-                            MemorySegment.class));
-            body = MethodHandles.insertArguments(body, 0, path);
-            MemorySegment block = ObjC.block(body, FunctionDescriptor.ofVoid(
-                    ValueLayout.ADDRESS, ValueLayout.ADDRESS), ObjC.GLOBAL);
-            ObjC.callVoid(get(handle).view, "takeSnapshotWithConfiguration:completionHandler:", config, block);
+            // Bind the path as the first Java-side argument of the upcall stub.
+            MethodHandle bound = java.lang.invoke.MethodHandles.insertArguments(
+                    ObjC.staticHandle(FFMWKWebView.class, "snapshotDone",
+                            MethodType.methodType(void.class, String.class, MemorySegment.class,
+                                    MemorySegment.class)), 0, path);
+            MemorySegment boundBlock = ObjC.block(bound,
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS), ObjC.GLOBAL);
+            ObjC.callVoid(get(handle).view, "takeSnapshotWithConfiguration:completionHandler:",
+                    config, boundBlock);
             return 1;
         } catch (Throwable t) { return 0; }
     }
 
     public static void snapshotDone(String path, MemorySegment block, MemorySegment image) {
-        // PNG write is handled by the Swift-free ImageIO path in a later pass.
+        if (image == null || image.address() == 0) return;
+        try {
+            MemorySegment tiff = (MemorySegment) ObjC.sendAddress(0).invoke(image, ObjC.sel("TIFFRepresentation"));
+            MemorySegment rep = (MemorySegment) ObjC.sendAddress(1).invoke(
+                    ObjC.cls("NSBitmapImageRep"), ObjC.sel("imageRepWithData:"), tiff);
+            MemorySegment png = (MemorySegment) ObjC.sendAddress(2).invoke(rep,
+                    ObjC.sel("representationUsingType:properties:"), MemorySegment.ofAddress(4),
+                    ObjC.sendAddress(0).invoke(ObjC.cls("NSDictionary"), ObjC.sel("dictionary")));
+            ObjC.callVoidPathBool(png, "writeToFile:atomically:", ObjC.nsString(path), true);
+        } catch (Throwable ignored) {}
     }
 
     public static long webkitMemoryBytes() {
-        // libproc is a system dylib; implemented in ProcBridge (next pass).
-        return -1;
+        try {
+            Process p = new ProcessBuilder("/bin/ps", "-A", "-o", "rss=,comm=")
+                    .redirectErrorStream(true).start();
+            String out = new String(p.getInputStream().readAllBytes());
+            p.waitFor();
+            long total = 0;
+            for (String line : out.split("\\n")) {
+                String t = line.trim();
+                if (!t.contains("com.apple.Web")) continue;
+                String[] parts = t.split("\\s+", 2);
+                if (parts.length < 2) continue;
+                try { total += Long.parseLong(parts[0]) * 1024L; } catch (NumberFormatException ignored) {}
+            }
+            return total > 0 ? total : -1;
+        } catch (Throwable t) { return -1; }
     }
 
     // ── delegate class / registrations ──────────────────────────────────
@@ -468,6 +459,22 @@ public final class FFMWKWebView {
                                     MemorySegment.class, MemorySegment.class, MemorySegment.class)),
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS), "v@:@@@");
+            ObjC.addMethod(c, "download:decideDestinationUsingResponse:suggestedFilename:completionHandler:",
+                    ObjC.staticHandle(FFMWKWebView.class, "downloadDecideDestination",
+                            MethodType.methodType(void.class, MemorySegment.class, MemorySegment.class,
+                                    MemorySegment.class, MemorySegment.class, MemorySegment.class, MemorySegment.class)),
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS), "v@:@@@@");
+            ObjC.addMethod(c, "downloadDidFinish:",
+                    ObjC.staticHandle(FFMWKWebView.class, "downloadFinished",
+                            MethodType.methodType(void.class, MemorySegment.class, MemorySegment.class, MemorySegment.class)),
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS), "v@:@");
+            ObjC.addMethod(c, "download:didFailWithError:resumeData:",
+                    ObjC.staticHandle(FFMWKWebView.class, "downloadFailed",
+                            MethodType.methodType(void.class, MemorySegment.class, MemorySegment.class,
+                                    MemorySegment.class, MemorySegment.class, MemorySegment.class)),
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS), "v@:@@@");
             ObjC.registerClass(c);
             return c;
         }
@@ -527,6 +534,9 @@ public final class FFMWKWebView {
         String name = ObjC.javaString((MemorySegment) ObjC.call0(message, "name"));
         MemorySegment body = (MemorySegment) ObjC.call0(message, "body");
         String payload = ObjC.javaString(body);
+        if ("rigelDownload".equals(name)) {
+            startDownload(w, payload);
+        }
         w.events.script(w.token, name, payload);
     }
 
@@ -549,6 +559,69 @@ public final class FFMWKWebView {
         } catch (Throwable t) {
             System.err.println("[rigel] decision handler invoke failed: " + t);
         }
+    }
+
+
+    private static void startDownload(WebView w, String payload) {
+        if (payload == null || payload.isBlank()) return;
+        try {
+            String url = java.net.URLDecoder.decode(payload.split("\\|")[0],
+                    java.nio.charset.StandardCharsets.UTF_8);
+            MemorySegment nsUrl = (MemorySegment) ObjC.sendAddress(1).invoke(ObjC.cls("NSURL"),
+                    ObjC.sel("URLWithString:"), ObjC.nsString(url));
+            if (nsUrl == null || nsUrl.address() == 0) return;
+            MemorySegment request = (MemorySegment) ObjC.sendAddress(1).invoke(ObjC.cls("NSURLRequest"),
+                    ObjC.sel("requestWithURL:"), nsUrl);
+            MemorySegment block = ObjC.block(
+                    ObjC.staticHandle(FFMWKWebView.class, "downloadStarted",
+                            MethodType.methodType(void.class, MemorySegment.class,
+                                    MemorySegment.class, MemorySegment.class)),
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS), ObjC.GLOBAL);
+            ObjC.callVoid(w.view, "startDownloadUsingRequest:completionHandler:", request, block);
+        } catch (Throwable ignored) {}
+    }
+
+    public static void downloadStarted(MemorySegment block, MemorySegment download, MemorySegment error) {
+        for (WebView w : HANDLES.values()) {
+            if (download != null && download.address() != 0) {
+                ObjC.callVoid(download, "setDelegate:", w.controller);
+                if (w.events != null) w.events.script(w.token, "rigelDownloadEvent", "started");
+            } else if (w.events != null) {
+                w.events.script(w.token, "rigelDownloadEvent", "failed|" + ObjC.javaString(error));
+            }
+        }
+    }
+
+    public static void downloadDecideDestination(MemorySegment self, MemorySegment cmd,
+                                                  MemorySegment download, MemorySegment response,
+                                                  MemorySegment filename, MemorySegment completion) {
+        try {
+            WebView w = owner(self);
+            String name = ObjC.javaString(filename);
+            if (name == null || name.isBlank()) name = "download";
+            String dir = w == null ? System.getProperty("user.home") + "/Downloads" : w.downloadDirectory;
+            java.nio.file.Path target = java.nio.file.Path.of(dir, name);
+            java.nio.file.Files.createDirectories(target.getParent());
+            MemorySegment url = (MemorySegment) ObjC.sendAddress(1).invoke(ObjC.cls("NSURL"),
+                    ObjC.sel("fileURLWithPath:"), ObjC.nsString(target.toString()));
+            MemorySegment invokePtr = completion.reinterpret(32).get(ValueLayout.ADDRESS, 16L);
+            MethodHandle invoke = ObjC.LINKER.downcallHandle(invokePtr,
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+            invoke.invoke(completion, url);
+        } catch (Throwable ignored) {}
+    }
+
+    public static void downloadFinished(MemorySegment self, MemorySegment cmd, MemorySegment download) {
+        WebView w = owner(self);
+        if (w != null && w.events != null) w.events.script(w.token, "rigelDownloadEvent", "finished");
+    }
+
+    public static void downloadFailed(MemorySegment self, MemorySegment cmd, MemorySegment download,
+                                       MemorySegment error, MemorySegment resumeData) {
+        WebView w = owner(self);
+        if (w != null && w.events != null)
+            w.events.script(w.token, "rigelDownloadEvent", "failed|" + ObjC.javaString(error));
     }
 
     public static boolean returnYes(MemorySegment self, MemorySegment cmd) { return true; }

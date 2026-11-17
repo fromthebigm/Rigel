@@ -237,36 +237,26 @@ final class MacVibrancy {
      */
     static boolean applyWindowGlass(Shell shell, boolean enabled, int material,
                                     double tintAlpha, int tintRgb, boolean dark) {
-        GlassBridge bridge = bridge();
         Pointer window = windowPointer(shell);
-        if (bridge == null || window == null) return false;
-        double r = ((tintRgb >> 16) & 0xFF) / 255.0;
-        double g = ((tintRgb >> 8) & 0xFF) / 255.0;
-        double b = (tintRgb & 0xFF) / 255.0;
-        try {
-            int ok = bridge.rigel_window_set_glass(window, enabled ? 1 : 0,
-                    material, tintAlpha, r, g, b, dark ? 1 : 0);
-            return enabled && ok != 0;
-        } catch (Throwable ignored) {
-            return false;
-        }
+        if (window == null) return false;
+        return ui.objc.GlassFFM.applyWindowGlass(com.sun.jna.Pointer.nativeValue(window),
+                enabled, material, tintAlpha, tintRgb, dark);
+
     }
 
     /** Titlebar-style window move started from a custom drag strip. Must run
      *  inside a SWT MouseDown listener so AppKit still has the NSEvent. */
     static void dragWindow(Shell shell) {
-        GlassBridge bridge = bridge();
         Pointer window = windowPointer(shell);
-        if (bridge == null || window == null) return;
-        try { bridge.rigel_window_drag(window); } catch (Throwable ignored) {}
+        if (window == null) return;
+        ui.objc.GlassFFM.dragWindow(com.sun.jna.Pointer.nativeValue(window));
     }
 
     /** Standard macOS titlebar double-click behaviour. */
     static void zoomWindow(Shell shell) {
-        GlassBridge bridge = bridge();
         Pointer window = windowPointer(shell);
-        if (bridge == null || window == null) return;
-        try { bridge.rigel_window_zoom(window); } catch (Throwable ignored) {}
+        if (window == null) return;
+        ui.objc.GlassFFM.zoomWindow(com.sun.jna.Pointer.nativeValue(window));
     }
 
     /**
