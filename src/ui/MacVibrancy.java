@@ -211,12 +211,10 @@ final class MacVibrancy {
         if (current != null || glassBridgeFailed) return current;
         synchronized (MacVibrancy.class) {
             if (glassBridge != null || glassBridgeFailed) return glassBridge;
-            try {
-                glassBridge = Native.load(MacWKWebView.bridgeLibraryPath(), GlassBridge.class);
-            } catch (Throwable failure) {
-                glassBridgeFailed = true;
-            }
-            return glassBridge;
+            // No custom dylib: glass effects are applied through AppKit/FFM
+            // in a later pass; the bridge is retired.
+            glassBridgeFailed = true;
+            return null;
         }
     }
 

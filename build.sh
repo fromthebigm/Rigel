@@ -16,10 +16,10 @@ if [[ -z "${JAVA_HOME:-}" || ! -x "$JAVA_HOME/bin/javac" ]]; then
   exit 1
 fi
 
-/bin/zsh "$ROOT/native/build-wkwebview.sh"
+# No custom dylib is built: WKWebView is hosted via JDK FFM.
 
 rm -rf "$ROOT/build"
-mkdir -p "$BUILD_DIR/native" "$ROOT/target"
+mkdir -p "$BUILD_DIR" "$ROOT/target"
 
 sources=("$ROOT"/src/**/*.java(N))
 if (( ${#sources} == 0 )); then
@@ -27,19 +27,15 @@ if (( ${#sources} == 0 )); then
   exit 1
 fi
 
-# Emit Java 21 class files (major 65) so the jar also runs on machines that
-# only have a system JDK 21, even though the bundle carries JDK 25. Without
-# this, classes built by the bundled JDK land at major 69 and older runtimes
-# fail with UnsupportedClassVersionError.
+# The no-dylib WKWebView host uses the JDK Foreign Function & Memory API,
+# which is stable only from JDK 22. Compile against the bundled JDK 25.
 "$JAVA_HOME/bin/javac" \
-  --release 21 \
   -encoding UTF-8 \
   -Xlint:all \
   -cp "$ROOT/lib/*" \
   -d "$BUILD_DIR" \
   $sources
 
-cp "$ROOT/classes/native/libRigelWKWebView.dylib" "$BUILD_DIR/native/"
 cp "$ROOT/resources/chrome-icon.png" "$BUILD_DIR/"
 cp "$ROOT/resources/rigel-icon.png" "$BUILD_DIR/"
 cp "$ROOT/resources/weather-icon.png" "$BUILD_DIR/"

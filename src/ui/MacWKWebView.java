@@ -361,14 +361,108 @@ final class MacWKWebView extends Composite {
         synchronized (MacWKWebView.class) {
             if (bridge != null) return bridge;
             try {
-                Path library = extractBridge();
-                bridge = Native.load(library.toAbsolutePath().toString(), Bridge.class);
+                // No dylib: all native work is done through FFM in FFMWKWebView.
+                bridge = new FfmBridge();
                 return bridge;
             } catch (Throwable failure) {
                 loadFailure = failure;
-                throw new IllegalStateException("Could not load the WKWebView bridge", failure);
+                throw new IllegalStateException("Could not initialize the WKWebView bridge", failure);
             }
         }
+    }
+
+    /** Adapter from the historic JNA Bridge interface to the FFM host. */
+    private static final class FfmBridge implements Bridge {
+        private long handle(long parentView, long token, int port, int mode, int flags,
+                            EventCallback ec, ScriptCallback sc, PolicyCallback pc) {
+            return ui.wk.FFMWKWebView.create(parentView, token, port, mode, flags, 0L,
+                    new ui.wk.FFMWKWebView.Events() {
+                        @Override public void event(long t, int type, String a, String b) {
+                            if (ec != null) ec.invoke(t, type, a, b);
+                        }
+                        @Override public void script(long t, String name, String payload) {
+                            if (sc != null) sc.invoke(t, name, payload);
+                        }
+                        @Override public boolean policy(long t, String url) {
+                            return pc == null || pc.invoke(t, url) != 0;
+                        }
+                        @Override public void evaluated(long token, String value, String error) {
+                            PendingEval pending = EVALUATIONS.remove(token);
+                            if (pending != null) pending.dispatch(value, error);
+                        }
+                    });
+        }
+
+        @Override public int rigel_wk_supported() { return ui.wk.FFMWKWebView.supported(); }
+        @Override public long rigel_webkit_memory_bytes() { return ui.wk.FFMWKWebView.webkitMemoryBytes(); }
+        @Override public int rigel_wk_cookies_save(String path) { return ui.wk.FFMWKWebView.cookiesSave(path); }
+        @Override public int rigel_wk_cookies_restore(String path) { return ui.wk.FFMWKWebView.cookiesRestore(path); }
+        @Override public void rigel_wk_disable_resource_load_statistics() {
+            ui.wk.FFMWKWebView.disableResourceLoadStatistics();
+        }
+        @Override public void rigel_wk_set_proxy_port(int p) { ui.wk.FFMWKWebView.setProxyPort(p); }
+        @Override public void rigel_wk_set_proxy(int p, int m) { ui.wk.FFMWKWebView.setProxy(p, m); }
+        @Override public void rigel_wk_set_av1_normalization(Pointer h, int e) {
+            ui.wk.FFMWKWebView.setAv1Normalization(ptr(h), e);
+        }
+        @Override public void rigel_wk_set_content_blocking(Pointer h, int e) {
+            ui.wk.FFMWKWebView.setContentBlocking(ptr(h), e);
+        }
+        @Override public void rigel_wk_set_download_options(Pointer h, String d, int a) {
+            ui.wk.FFMWKWebView.setDownloadOptions(ptr(h), d, a != 0);
+        }
+        @Override public int rigel_wk_cancel_download(Pointer h, String id) {
+            return ui.wk.FFMWKWebView.cancelDownload(ptr(h), id);
+        }
+        @Override public Pointer rigel_wk_create(long parentView, long token, int port, int mode,
+                                                  int unusedMode, long unusedSessionId,
+                                                  EventCallback ec, ScriptCallback sc, PolicyCallback pc) {
+            long h = handle(parentView, token, port, mode, unusedMode, ec, sc, pc);
+            return h == 0 ? null : new Pointer(h);
+        }
+        @Override public void rigel_wk_destroy(Pointer h) { ui.wk.FFMWKWebView.destroy(ptr(h)); }
+        @Override public int rigel_wk_test_simulate_content_process_termination(Pointer h) { return 0; }
+        @Override public int rigel_wk_load_url(Pointer h, String url) {
+            return ui.wk.FFMWKWebView.loadUrl(ptr(h), url);
+        }
+        @Override public int rigel_wk_load_html(Pointer h, String html) {
+            return ui.wk.FFMWKWebView.loadHtml(ptr(h), html);
+        }
+        @Override public void rigel_wk_back(Pointer h) { ui.wk.FFMWKWebView.back(ptr(h)); }
+        @Override public void rigel_wk_forward(Pointer h) { ui.wk.FFMWKWebView.forward(ptr(h)); }
+        @Override public void rigel_wk_reload(Pointer h) { ui.wk.FFMWKWebView.reload(ptr(h)); }
+        @Override public void rigel_wk_reload_from_origin(Pointer h) {
+            ui.wk.FFMWKWebView.reloadFromOrigin(ptr(h));
+        }
+        @Override public void rigel_wk_stop(Pointer h) { ui.wk.FFMWKWebView.stop(ptr(h)); }
+        @Override public int rigel_wk_can_back(Pointer h) { return ui.wk.FFMWKWebView.canBack(ptr(h)); }
+        @Override public int rigel_wk_can_forward(Pointer h) { return ui.wk.FFMWKWebView.canForward(ptr(h)); }
+        @Override public void rigel_wk_set_frame(Pointer h, double x, double y, double w, double ht) {
+            ui.wk.FFMWKWebView.setFrame(ptr(h), x, y, w, ht);
+        }
+        @Override public void rigel_wk_set_transparent(Pointer h, int t) {
+            ui.wk.FFMWKWebView.setTransparent(ptr(h), t);
+        }
+        @Override public int rigel_wk_snapshot(Pointer h, String path) {
+            return ui.wk.FFMWKWebView.snapshot(ptr(h), path);
+        }
+        @Override public int rigel_wk_set_page_zoom(Pointer h, double z) {
+            return ui.wk.FFMWKWebView.setPageZoom(ptr(h), z);
+        }
+        @Override public void rigel_wk_focus(Pointer h) { ui.wk.FFMWKWebView.focus(ptr(h)); }
+        @Override public int rigel_wk_edit_action(Pointer h, int a) {
+            return ui.wk.FFMWKWebView.editAction(ptr(h), a);
+        }
+        @Override public void rigel_wk_execute(Pointer h, String js) {
+            ui.wk.FFMWKWebView.execute(ptr(h), js);
+        }
+        @Override public int rigel_wk_add_user_script(Pointer h, String js, int m) {
+            return ui.wk.FFMWKWebView.addUserScript(ptr(h), js, m);
+        }
+        @Override public void rigel_wk_evaluate(Pointer h, String js, long token, EvalCallback cb) {
+            ui.wk.FFMWKWebView.evaluate(ptr(h), js, token);
+        }
+        private static long ptr(Pointer p) { return p == null ? 0 : com.sun.jna.Pointer.nativeValue(p); }
     }
 
     /**
