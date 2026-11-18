@@ -265,17 +265,9 @@ final class MacVibrancy {
      * reach it. Clears it over glass, or restores the theme fill when off.
      */
     static void styleTabScroller(Composite scroller, boolean glass, int backgroundRgb) {
-        GlassBridge bridge = bridge();
-        if (bridge == null || scroller == null || scroller.isDisposed()) return;
-        try {
-            if (scroller.view == null || scroller.view.id == 0) return;
-            double r = ((backgroundRgb >> 16) & 0xFF) / 255.0;
-            double g = ((backgroundRgb >> 8) & 0xFF) / 255.0;
-            double b = (backgroundRgb & 0xFF) / 255.0;
-            bridge.rigel_scroll_set_glass(new Pointer(scroller.view.id),
-                    glass ? 1 : 0, r, g, b);
-        } catch (Throwable ignored) {
-        }
+        if (scroller == null || scroller.isDisposed() || scroller.view == null
+                || scroller.view.id == 0) return;
+        ui.objc.GlassFFM.styleView(scroller.view.id, glass, backgroundRgb, 1.0, 0);
     }
 
     /** Gives the address field a translucent fill over the glass material.
@@ -283,20 +275,9 @@ final class MacVibrancy {
     static void styleAddressField(Text field, boolean glass,
                                   int backgroundRgb, double backgroundAlpha,
                                   int foregroundRgb) {
-        GlassBridge bridge = bridge();
-        if (bridge == null || field == null || field.isDisposed()) return;
-        try {
-            if (field.view == null || field.view.id == 0) return;
-            double r = ((backgroundRgb >> 16) & 0xFF) / 255.0;
-            double g = ((backgroundRgb >> 8) & 0xFF) / 255.0;
-            double b = (backgroundRgb & 0xFF) / 255.0;
-            double fr = ((foregroundRgb >> 16) & 0xFF) / 255.0;
-            double fg = ((foregroundRgb >> 8) & 0xFF) / 255.0;
-            double fb = (foregroundRgb & 0xFF) / 255.0;
-            bridge.rigel_field_set_glass(new Pointer(field.view.id), glass ? 1 : 0,
-                    r, g, b, backgroundAlpha, fr, fg, fb);
-        } catch (Throwable ignored) {
-        }
+        if (field == null || field.isDisposed() || field.view == null || field.view.id == 0) return;
+        ui.objc.GlassFFM.styleView(field.view.id, glass, backgroundRgb,
+                backgroundAlpha, foregroundRgb);
     }
 
     private static final class State extends ControlAdapter {

@@ -61,6 +61,40 @@ public final class GlassFFM {
         } catch (Throwable ignored) {}
     }
 
+    /** Clear an NSScrollView/NSTextField's own plate over glass, or restore
+     *  the explicit theme fill when glass is off. */
+    public static boolean styleView(long viewPtr, boolean glass, int backgroundRgb,
+                                    double backgroundAlpha, int foregroundRgb) {
+        if (viewPtr == 0) return false;
+        try {
+            MemorySegment view = MemorySegment.ofAddress(viewPtr);
+            MethodHandle colorWith = ObjC.LINKER.downcallHandle(ObjC.MSG_SEND,
+                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.JAVA_DOUBLE, ValueLayout.JAVA_DOUBLE,
+                            ValueLayout.JAVA_DOUBLE, ValueLayout.JAVA_DOUBLE));
+            double r, g, b, a;
+            if (glass) { r = g = b = 0; a = 0; }
+            else {
+                r = ((backgroundRgb >> 16) & 0xFF) / 255.0;
+                g = ((backgroundRgb >> 8) & 0xFF) / 255.0;
+                b = (backgroundRgb & 0xFF) / 255.0;
+                a = backgroundAlpha;
+            }
+            MemorySegment color = (MemorySegment) colorWith.invoke(ObjC.cls("NSColor"),
+                    ObjC.sel("colorWithCalibratedRed:green:blue:alpha:"), r, g, b, a);
+            ObjC.callVoid(view, "setBackgroundColor:", color);
+            if (foregroundRgb != 0) {
+                double fr = ((foregroundRgb >> 16) & 0xFF) / 255.0;
+                double fg = ((foregroundRgb >> 8) & 0xFF) / 255.0;
+                double fb = (foregroundRgb & 0xFF) / 255.0;
+                MemorySegment fgColor = (MemorySegment) colorWith.invoke(ObjC.cls("NSColor"),
+                        ObjC.sel("colorWithCalibratedRed:green:blue:alpha:"), fr, fg, fb, 1.0);
+                ObjC.callVoid(view, "setTextColor:", fgColor);
+            }
+            return true;
+        } catch (Throwable t) { return false; }
+    }
+
     private static int mappedMaterial(int material, boolean dark) {
         // NSVisualEffectMaterial mapping: 0 appearance-based, 3 dark, 4 light,
         // 9 hudWindow. Rigel's material ids are palette-specific; keep the

@@ -43,7 +43,7 @@ cp "$ROOT/resources/anchor-polyfill.js" "$BUILD_DIR/"
 cp "$ROOT/resources/anchor-polyfill.LICENSE.txt" "$BUILD_DIR/"
 
 # Rigel runs directly from compiled classes (no jar). build/classes is the
-# runtime classpath root; resources and the native bridge dylib are copied
+# runtime classpath root; resources are copied
 # in alongside so Class.getResourceAsStream() resolves them at runtime.
 mkdir -p "$ROOT/build/classes"
 

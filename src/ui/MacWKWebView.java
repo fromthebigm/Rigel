@@ -421,7 +421,9 @@ final class MacWKWebView extends Composite {
             return h == 0 ? null : new Pointer(h);
         }
         @Override public void rigel_wk_destroy(Pointer h) { ui.wk.FFMWKWebView.destroy(ptr(h)); }
-        @Override public int rigel_wk_test_simulate_content_process_termination(Pointer h) { return 0; }
+        @Override public int rigel_wk_test_simulate_content_process_termination(Pointer h) {
+            return ui.wk.FFMWKWebView.testSimulateContentProcessTermination(ptr(h));
+        }
         @Override public int rigel_wk_load_url(Pointer h, String url) {
             return ui.wk.FFMWKWebView.loadUrl(ptr(h), url);
         }
@@ -518,56 +520,6 @@ final class MacWKWebView extends Composite {
         } catch (Throwable unavailable) {
             return 0;
         }
-    }
-
-    /**
-     * Absolute path of the bundled native bridge dylib. MacVibrancy loads the
-     * same library with its own interface to reach the window-level glass
-     * entry points; JNA/dyld coalesce the duplicate handle.
-     */
-    static String bridgeLibraryPath() {
-        try {
-            return extractBridge().toAbsolutePath().toString();
-        } catch (Throwable failure) {
-            throw new IllegalStateException("Could not load the WKWebView bridge", failure);
-        }
-    }
-
-    private static Path extractBridge() throws Exception {
-        String resource = "/native/libRigelWKWebView.dylib";
-        byte[] bytes;
-        try (InputStream input = MacWKWebView.class.getResourceAsStream(resource)) {
-            if (input == null) throw new IOException("Missing " + resource);
-            bytes = input.readAllBytes();
-        }
-        String fullDigest = HexFormat.of().formatHex(
-                MessageDigest.getInstance("SHA-256").digest(bytes));
-        String digest = fullDigest.substring(0, 16);
-        String source = String.valueOf(MacWKWebView.class.getProtectionDomain().getCodeSource().getLocation());
-        String distId = Integer.toHexString(source.hashCode());
-        Path directory = Path.of(System.getProperty("java.io.tmpdir"), "rigel-native", distId, digest);
-        Path output = directory.resolve("libRigelWKWebView.dylib");
-        Files.createDirectories(directory);
-        boolean validExisting = Files.exists(output) && Files.size(output) == bytes.length
-                && fullDigest.equals(HexFormat.of().formatHex(
-                        MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(output))));
-        if (!validExisting) {
-            Path temporary = Files.createTempFile(directory, "libRigelWKWebView.", ".tmp");
-            try {
-                Files.write(temporary, bytes);
-                try {
-                    Files.move(temporary, output, StandardCopyOption.REPLACE_EXISTING,
-                            StandardCopyOption.ATOMIC_MOVE);
-                } catch (AtomicMoveNotSupportedException ignored) {
-                    Files.move(temporary, output, StandardCopyOption.REPLACE_EXISTING);
-                }
-            } finally {
-                Files.deleteIfExists(temporary);
-            }
-        }
-        output.toFile().setReadable(true, true);
-        output.toFile().setExecutable(true, true);
-        return output;
     }
 
     private static String safe(String value) { return value == null ? "" : value; }

@@ -28,9 +28,11 @@ public final class FFMWKWebView {
 
     private static final AtomicLong NEXT_HANDLE = new AtomicLong(1);
     private static final Map<Long, WebView> HANDLES = new ConcurrentHashMap<>();
+    private static final Map<Long, java.util.ArrayDeque<Long>> TERMINATIONS = new ConcurrentHashMap<>();
     private static volatile boolean delegatesInstalled;
     private static volatile long proxyPort = 8888;
     private static volatile int proxyMode = 0;
+    private static volatile boolean proxyConfigured;
 
     private FFMWKWebView() {}
 
@@ -45,6 +47,8 @@ public final class FFMWKWebView {
         volatile int normalizeAv1, contentBlocking;
         String downloadDirectory = System.getProperty("user.home") + "/Downloads";
         boolean askBeforeDownload;
+        final Map<String, MemorySegment> downloads = new ConcurrentHashMap<>();
+        final java.util.concurrent.atomic.AtomicInteger downloadSeq = new java.util.concurrent.atomic.AtomicInteger();
     }
 
     private static final class DelegateRegistry {
@@ -61,8 +65,17 @@ public final class FFMWKWebView {
         }
     }
 
-    public static void setProxyPort(int port) { proxyPort = port; }
-    public static void setProxy(int port, int mode) { proxyPort = port; proxyMode = mode; }
+    public static int testSimulateContentProcessTermination(long handle) {
+        if (System.getenv("RIGEL_WK_LIFECYCLE_TEST") == null) return 0;
+        try {
+            WebView w = get(handle);
+            ObjC.callVoid(w.controller, "webViewWebContentProcessDidTerminate:", w.view);
+            return 1;
+        } catch (Throwable t) { return 0; }
+    }
+
+    public static void setProxyPort(int port) { proxyPort = port; proxyConfigured = true; }
+    public static void setProxy(int port, int mode) { proxyPort = port; proxyMode = mode; proxyConfigured = true; }
 
     public static long create(long parentView, long token, int port, int mode,
                               int flags, long unusedSessionId, Events events) {
@@ -74,7 +87,9 @@ public final class FFMWKWebView {
         w.parent = MemorySegment.ofAddress(parentView);
         w.normalizeAv1 = (flags & 1) != 0 ? 1 : 0;
         w.contentBlocking = (flags & 2) != 0 ? 1 : 0;
-        proxyPort = port; proxyMode = mode;
+        if (!proxyConfigured) { proxyPort = port; proxyMode = mode; }
+        int effectivePort = (int) proxyPort;
+        int effectiveMode = proxyMode;
 
         try {
             // Controller (delegate object) — dynamic subclass of NSObject with
@@ -87,12 +102,13 @@ public final class FFMWKWebView {
             MemorySegment dataStore = (MemorySegment) ObjC.sendAddress(0).invoke(
                     ObjC.cls("WKWebsiteDataStore"), ObjC.sel("defaultDataStore"));
             ObjC.callVoid(w.configuration, "setWebsiteDataStore:", dataStore);
-            configureProxy(dataStore, port, mode);
+            configureProxy(dataStore, effectivePort, effectiveMode);
 
             // Safari-ish user agent + preferences
             MemorySegment ua = (MemorySegment) ObjC.sendAddress(0).invoke(
                     ObjC.cls("WKPreferences"), ObjC.sel("new"));
             ObjC.callVoidBool(ua, "setJavaScriptCanOpenWindowsAutomatically:", true);
+            enablePopoverAttribute(ua);
             ObjC.callVoid(w.configuration, "setPreferences:", ua);
 
             w.contentController = ObjC.allocInit(ObjC.cls("WKUserContentController"));
@@ -118,6 +134,9 @@ public final class FFMWKWebView {
             ObjC.callVoidBool(w.view, "setAllowsMagnification:", true);
             ObjC.callVoid(w.parent, "addSubview:", w.view);
             if (System.getProperty("rigel.ffm.diag") != null) {
+                System.out.println("[ffm] script handler responds="
+                    + ObjC.callBool(w.controller, "respondsToSelector:",
+                        ObjC.sel("userContentController:didReceiveScriptMessage:")));
                 System.out.println("[ffm] delegate test call");
                 ObjC.callVoid(w.controller, "webView:didFinishNavigation:", w.view, MemorySegment.NULL);
             }
@@ -198,9 +217,14 @@ public final class FFMWKWebView {
     }
 
     public static int setPageZoom(long handle, double zoom) {
-        // WKWebView pageZoom SPI is private; use CSS zoom fallback. Returning
-        // 0 makes the caller apply its CSS fallback.
-        return 0;
+        try {
+            MemorySegment view = get(handle).view;
+            if (!ObjC.callBool(view, "respondsToSelector:", ObjC.sel("setPageZoom:"))) return 0;
+            MethodHandle set = ObjC.LINKER.downcallHandle(ObjC.MSG_SEND,
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_DOUBLE));
+            set.invoke(view, ObjC.sel("setPageZoom:"), zoom);
+            return 1;
+        } catch (Throwable t) { return 0; }
     }
 
     public static void focus(long handle) {
@@ -231,10 +255,10 @@ public final class FFMWKWebView {
                     ObjC.cls("WKUserScript"), ObjC.sel("alloc"));
             MethodHandle init = ObjC.LINKER.downcallHandle(ObjC.MSG_SEND,
                     FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
-                            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_BOOLEAN));
+                            ValueLayout.ADDRESS, ValueLayout.JAVA_LONG, ValueLayout.JAVA_BOOLEAN));
             MemorySegment script = (MemorySegment) init.invoke(alloc,
                     ObjC.sel("initWithSource:injectionTime:forMainFrameOnly:"),
-                    ObjC.nsString(javascript), ObjC.nsString("atDocumentStart"), mainFrameOnly != 0);
+                    ObjC.nsString(javascript), 0L, mainFrameOnly != 0);
             if (script == null || script.address() == 0) return 0;
             ObjC.callVoid(get(handle).contentController, "addUserScript:", script);
             return 1;
@@ -270,9 +294,25 @@ public final class FFMWKWebView {
     // ── proxy / content blocking / cookies ──────────────────────────────
 
     private static void configureProxy(MemorySegment dataStore, int port, int mode) {
+        if (System.getProperty("rigel.ffm.diag") != null)
+            System.out.println("[ffm] configureProxy enter port=" + port + " mode=" + mode);
         if (port <= 0) return;
         try {
-            SymbolLookup net = SymbolLookup.libraryLookup("/usr/lib/libNetwork.dylib", ObjC.GLOBAL);
+            SymbolLookup net;
+            try { net = SymbolLookup.libraryLookup("/usr/lib/libNetwork.dylib", ObjC.GLOBAL); }
+            catch (Throwable e) {
+                try { net = SymbolLookup.libraryLookup(
+                        "/System/Library/Frameworks/Network.framework/Versions/A/Network", ObjC.GLOBAL); }
+                catch (Throwable e2) {
+                    if (System.getProperty("rigel.ffm.diag") != null)
+                        System.out.println("[ffm] Network.framework lookup failed: " + e2);
+                    return;
+                }
+            }
+            if (System.getProperty("rigel.ffm.diag") != null)
+                System.out.println("[ffm] proxy symbols: endpoint=" + net.find("nw_endpoint_create_host").isPresent()
+                    + " socks=" + net.find("nw_proxy_config_create_socksv5").isPresent()
+                    + " http=" + net.find("nw_proxy_config_create_http_connect").isPresent());
             MethodHandle endpointFn = ObjC.LINKER.downcallHandle(net.find("nw_endpoint_create_host").orElseThrow(),
                     FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             MethodHandle socksFn = net.find("nw_proxy_config_create_socksv5")
@@ -296,7 +336,46 @@ public final class FFMWKWebView {
             MemorySegment array = (MemorySegment) ObjC.sendAddress(1).invoke(ObjC.cls("NSArray"),
                     ObjC.sel("arrayWithObject:"), proxy);
             ObjC.callVoid(dataStore, "setProxyConfigurations:", array);
+            if (System.getProperty("rigel.ffm.diag") != null)
+                System.out.println("[ffm] proxy configured port=" + port + " mode=" + mode);
         } catch (Throwable ignored) {}
+    }
+
+    private static void enablePopoverAttribute(MemorySegment preferences) {
+        try {
+            MemorySegment cls = ObjC.cls("WKPreferences");
+            boolean classFeatures = ObjC.callBool(cls, "respondsToSelector:", ObjC.sel("_features"));
+            if (System.getProperty("rigel.ffm.diag") != null)
+                System.out.println("[ffm] classFeatures=" + classFeatures);
+            if (!classFeatures) return;
+            if (!ObjC.callBool(preferences, "respondsToSelector:",
+                    ObjC.sel("_setEnabled:forFeature:"))) return;
+            MemorySegment features = (MemorySegment) ObjC.sendAddress(0).invoke(cls, ObjC.sel("_features"));
+            if (System.getProperty("rigel.ffm.diag") != null)
+                System.out.println("[ffm] features=" + (features == null ? -1 : features.address()));
+            if (features == null || features.address() == 0) return;
+            long count = ObjC.callLong(features, "count");
+            for (long i = 0; i < count; i++) {
+                MethodHandle objectAt = ObjC.LINKER.downcallHandle(ObjC.MSG_SEND,
+                        FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
+                MemorySegment feature = (MemorySegment) objectAt.invoke(
+                        features, ObjC.sel("objectAtIndex:"), i);
+                if (!ObjC.callBool(feature, "respondsToSelector:", ObjC.sel("key"))) continue;
+                String key = ObjC.javaString(ObjC.call0(feature, "key"));
+                if (System.getProperty("rigel.ffm.diag") != null)
+                    System.out.println("[ffm] feature key=" + key);
+                if (!"PopoverAttributeEnabled".equals(key)) continue;
+                MethodHandle setFeature = ObjC.LINKER.downcallHandle(ObjC.MSG_SEND,
+                        FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                                ValueLayout.JAVA_BOOLEAN, ValueLayout.ADDRESS));
+                setFeature.invoke(preferences, ObjC.sel("_setEnabled:forFeature:"), true, feature);
+                return;
+            }
+        } catch (Throwable t) {
+            if (System.getProperty("rigel.ffm.diag") != null)
+                System.out.println("[ffm] popover enable failed: " + t);
+        }
     }
 
     private static void installUserScripts(WebView w) {
@@ -320,10 +399,10 @@ public final class FFMWKWebView {
                     ObjC.cls("WKUserScript"), ObjC.sel("alloc"));
             MethodHandle init = ObjC.LINKER.downcallHandle(ObjC.MSG_SEND,
                     FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
-                            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_BOOLEAN));
+                            ValueLayout.ADDRESS, ValueLayout.JAVA_LONG, ValueLayout.JAVA_BOOLEAN));
             MemorySegment script = (MemorySegment) init.invoke(alloc,
                     ObjC.sel("initWithSource:injectionTime:forMainFrameOnly:"),
-                    ObjC.nsString(source), ObjC.nsString("atDocumentStart"), false);
+                    ObjC.nsString(source), 0L, false);
             if (script != null && script.address() != 0)
                 ObjC.callVoid(w.contentController, "addUserScript:", script);
         } catch (Throwable ignored) {}
@@ -349,9 +428,14 @@ public final class FFMWKWebView {
     }
 
     public static int cancelDownload(long handle, String identifier) {
-        // Tracked downloads are keyed in the delegate; cancellation is wired
-        // there. Return 0 when unknown.
-        return 0;
+        WebView w = get(handle);
+        MemorySegment download = w.downloads.remove(identifier);
+        if (download == null || download.address() == 0) return 0;
+        try {
+            ObjC.callVoid(download, "cancel");
+            w.events.script(w.token, "rigelDownloadEvent", "cancelled|" + identifier);
+            return 1;
+        } catch (Throwable t) { return 0; }
     }
 
     public static void disableResourceLoadStatistics() {
@@ -459,6 +543,17 @@ public final class FFMWKWebView {
                                     MemorySegment.class, MemorySegment.class, MemorySegment.class)),
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS), "v@:@@@");
+            ObjC.addMethod(c, "webView:createWebViewWithConfiguration:forNavigationAction:windowFeatures:",
+                    ObjC.staticHandle(FFMWKWebView.class, "createPopup",
+                            MethodType.methodType(MemorySegment.class, MemorySegment.class, MemorySegment.class,
+                                    MemorySegment.class, MemorySegment.class, MemorySegment.class, MemorySegment.class)),
+                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS),
+                    "@@:@@@@");
+            ObjC.addMethod(c, "webViewWebContentProcessDidTerminate:",
+                    ObjC.staticHandle(FFMWKWebView.class, "processTerminated",
+                            MethodType.methodType(void.class, MemorySegment.class, MemorySegment.class, MemorySegment.class)),
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS), "v@:@");
             ObjC.addMethod(c, "download:decideDestinationUsingResponse:suggestedFilename:completionHandler:",
                     ObjC.staticHandle(FFMWKWebView.class, "downloadDecideDestination",
                             MethodType.methodType(void.class, MemorySegment.class, MemorySegment.class,
@@ -507,8 +602,8 @@ public final class FFMWKWebView {
     private static MemorySegment webViewClass() { return WebViewClassHolder.CLASS; }
 
     private static String[] handlerNames() {
-        return new String[]{"rigelDownload", "rigelDownloadEvent", "rigelEvent",
-                "rigelPopup", "rigelMedia", "rigelNav"};
+        return new String[]{"javaEnterFullscreen", "javaExitFullscreen", "rigelHomeNavigate",
+                "rigelClipboardWrite", "rigelDownload", "rigelEvent", "rigelDiagnostics"};
     }
 
     private static WebView owner(MemorySegment self) {
@@ -582,15 +677,110 @@ public final class FFMWKWebView {
         } catch (Throwable ignored) {}
     }
 
+    public static MemorySegment createPopup(MemorySegment self, MemorySegment cmd,
+                                             MemorySegment webView, MemorySegment configuration,
+                                             MemorySegment action, MemorySegment features) {
+        WebView w = owner(self);
+        if (w != null && w.events != null) {
+            String url = "";
+            try {
+                MemorySegment req = ObjC.call0(action, "request");
+                url = ObjC.javaString(ObjC.call0(ObjC.call0(req, "URL"), "absoluteString"));
+            } catch (Throwable ignored) {}
+            w.events.event(w.token, 7, url, "");
+        }
+        try {
+            MemorySegment alloc = (MemorySegment) ObjC.sendAddress(0).invoke(ObjC.cls("WKWebView"), ObjC.sel("alloc"));
+            MethodHandle initPopup = ObjC.LINKER.downcallHandle(ObjC.MSG_SEND,
+                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, ObjC.CGRect, ValueLayout.ADDRESS));
+            MemorySegment popup = (MemorySegment) initPopup.invoke(alloc,
+                    ObjC.sel("initWithFrame:configuration:"),
+                    ObjC.rect(ObjC.GLOBAL, 0, 0, 1, 1), configuration);
+            if (popup != null && popup.address() != 0) ObjC.callVoid(popup, "retain");
+            return popup;
+        } catch (Throwable t) { return MemorySegment.NULL; }
+    }
+
+    public static void processTerminated(MemorySegment self, MemorySegment cmd, MemorySegment webView) {
+        WebView w = owner(self);
+        if (w == null || w.events == null) return;
+        String url = ObjC.javaString(ObjC.call0(ObjC.call0(webView, "URL"), "absoluteString"));
+        w.events.event(w.token, 6, url, "");
+        boolean hidden = false;
+        try {
+            MemorySegment window = ObjC.call0(webView, "window");
+            hidden = window == null || window.address() == 0
+                    || ObjC.callBool(webView, "isHiddenOrHasHiddenAncestor");
+        } catch (Throwable ignored) {}
+        long now = System.currentTimeMillis();
+        var history = TERMINATIONS.computeIfAbsent(webView.address(), k -> new java.util.ArrayDeque<>());
+        while (!history.isEmpty() && now - history.peekFirst() > 60_000) history.removeFirst();
+        history.addLast(now);
+        if (!hidden) {
+            if (history.size() <= 3) {
+                long delay = 250L * (1L << Math.min(2, history.size() - 1));
+                final long target = webView.address();
+                Thread t = new Thread(() -> {
+                    try {
+                        Thread.sleep(delay);
+                        WebView current = HANDLES.values().stream()
+                                .filter(v -> v.view != null && v.view.address() == target)
+                                .findFirst().orElse(null);
+                        if (current != null && !current.destroyed)
+                            ObjC.callVoid(current.view, "reload");
+                    } catch (Throwable ignored) {}
+                }, "rigel-termination-reload");
+                t.setDaemon(true);
+                t.start();
+            } else {
+                w.events.event(w.token, 3, url, "Web content process repeatedly crashed; automatic reload stopped");
+            }
+        }
+    }
+
     public static void downloadStarted(MemorySegment block, MemorySegment download, MemorySegment error) {
         for (WebView w : HANDLES.values()) {
             if (download != null && download.address() != 0) {
+                String id = "dl-" + w.downloadSeq.incrementAndGet();
+                w.downloads.put(id, download);
                 ObjC.callVoid(download, "setDelegate:", w.controller);
-                if (w.events != null) w.events.script(w.token, "rigelDownloadEvent", "started");
+                if (w.events != null) w.events.script(w.token, "rigelDownloadEvent", "started|" + id);
+                startProgressPoller(w, id, download);
             } else if (w.events != null) {
                 w.events.script(w.token, "rigelDownloadEvent", "failed|" + ObjC.javaString(error));
             }
         }
+    }
+
+    private static void startProgressPoller(WebView w, String id, MemorySegment download) {
+        Thread t = new Thread(() -> {
+            while (!w.destroyed && w.downloads.containsKey(id)) {
+                try {
+                    MemorySegment progress = ObjC.call0(download, "progress");
+                    if (progress != null && progress.address() != 0) {
+                        double fraction = ObjC.callDouble(progress, "fractionCompleted");
+                        if (w.events != null)
+                            w.events.script(w.token, "rigelDownloadEvent",
+                                    "progress|" + id + "|" + (int) Math.round(fraction * 100));
+                    }
+                    Thread.sleep(500);
+                } catch (Throwable ignored) { break; }
+            }
+        }, "rigel-download-progress");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    private static String downloadId(WebView fallback, MemorySegment download) {
+        if (fallback != null) {
+            for (var e : fallback.downloads.entrySet())
+                if (e.getValue().address() == download.address()) return e.getKey();
+        }
+        for (WebView w : HANDLES.values())
+            for (var e : w.downloads.entrySet())
+                if (e.getValue().address() == download.address()) return e.getKey();
+        return "";
     }
 
     public static void downloadDecideDestination(MemorySegment self, MemorySegment cmd,
@@ -598,6 +788,9 @@ public final class FFMWKWebView {
                                                   MemorySegment filename, MemorySegment completion) {
         try {
             WebView w = owner(self);
+            String id = downloadId(w, download);
+            if (w != null && w.events != null)
+                w.events.script(w.token, "rigelDownloadEvent", "destination|" + id);
             String name = ObjC.javaString(filename);
             if (name == null || name.isBlank()) name = "download";
             String dir = w == null ? System.getProperty("user.home") + "/Downloads" : w.downloadDirectory;
@@ -614,14 +807,18 @@ public final class FFMWKWebView {
 
     public static void downloadFinished(MemorySegment self, MemorySegment cmd, MemorySegment download) {
         WebView w = owner(self);
-        if (w != null && w.events != null) w.events.script(w.token, "rigelDownloadEvent", "finished");
+        String id = downloadId(w, download);
+        if (w != null) w.downloads.remove(id);
+        if (w != null && w.events != null) w.events.script(w.token, "rigelDownloadEvent", "finished|" + id);
     }
 
     public static void downloadFailed(MemorySegment self, MemorySegment cmd, MemorySegment download,
                                        MemorySegment error, MemorySegment resumeData) {
         WebView w = owner(self);
+        String id = downloadId(w, download);
+        if (w != null) w.downloads.remove(id);
         if (w != null && w.events != null)
-            w.events.script(w.token, "rigelDownloadEvent", "failed|" + ObjC.javaString(error));
+            w.events.script(w.token, "rigelDownloadEvent", "failed|" + id + "|" + ObjC.javaString(error));
     }
 
     public static boolean returnYes(MemorySegment self, MemorySegment cmd) { return true; }
