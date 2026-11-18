@@ -37,17 +37,13 @@ else
 fi
 unset RIGEL_LAUNCH_MODE
 
-if [[ -x "$DIR/jdk/Contents/Home/bin/java" ]]; then
-  JAVA="$DIR/jdk/Contents/Home/bin/java"
-elif [[ -n "${JAVA_HOME:-}" && -x "$JAVA_HOME/bin/java" ]]; then
-  JAVA="$JAVA_HOME/bin/java"
-else
-  JAVA="$(command -v java 2>/dev/null || true)"
-fi
-if [[ -z "$JAVA" || ! -x "$JAVA" ]]; then
-  print -u2 "No Java runtime found. Add the bundled jdk/ folder or set JAVA_HOME."
+# This app is portable: it must run on its bundled JDK, never a system Java.
+if [[ ! -x "$DIR/jdk/Contents/Home/bin/java" ]]; then
+  print -u2 "Bundled JDK not found at $DIR/jdk/Contents/Home/bin/java."
+  print -u2 "This portable app requires the bundled JDK that ships with it."
   exit 1
 fi
+JAVA="$DIR/jdk/Contents/Home/bin/java"
 
 # Keep fatal JVM/native crash reports beside Rigel's portable settings so a
 # failure on another Mac leaves actionable evidence. The JVM writes this file

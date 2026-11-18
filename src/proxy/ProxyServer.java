@@ -356,6 +356,21 @@ public class ProxyServer {
     }
 
     public boolean isUsingUpstream() { return upstream != null; }
+
+    /** Reachability probe for a saved upstream. A stale upstream (e.g. a
+     *  localhost proxy that is no longer running) causes every browser
+     *  connection to be reset; detect it at startup and fall back to DIRECT. */
+    public boolean probeUpstream(int timeoutMs) {
+        Upstream value = upstream;
+        if (value == null) return true;
+        try (java.net.Socket probe = new java.net.Socket()) {
+            probe.connect(new java.net.InetSocketAddress(value.host(), value.port()), timeoutMs);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     public Upstream getUpstream() { return upstream; }
 
     public String getUpstreamHost() {

@@ -203,6 +203,12 @@ public final class BrowserApplication {
                     ProxyServer.UpstreamType.fromSetting(settings.getUpstreamType()),
                     host, port,
                     settings.getUpstreamUser(), settings.getUpstreamPass());
+            if (!proxyServer.probeUpstream(600)) {
+                System.err.println("[Rigel] Saved upstream " + host + ":" + port
+                        + " is unreachable; falling back to DIRECT");
+                proxyServer.clearUpstream();
+                settings.clearUpstream();
+            }
         } catch (IllegalArgumentException invalid) {
             System.err.println("[Rigel] Ignoring invalid saved upstream proxy; using DIRECT: "
                     + invalid.getMessage());
