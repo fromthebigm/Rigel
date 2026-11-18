@@ -105,11 +105,34 @@ public final class FFMWKWebView {
             ObjC.callVoid(w.configuration, "setWebsiteDataStore:", dataStore);
             configureProxy(dataStore, effectivePort, effectiveMode);
 
-            // Safari-ish user agent + preferences
+            // Safari-ish user agent + shared process pool (native parity:
+            // SafariApplicationName() / SharedProcessPool()).
+            String uaName = safariApplicationName();
+            ObjC.callVoid(w.configuration, "setApplicationNameForUserAgent:", ObjC.nsString(uaName));
+            if (System.getProperty("rigel.ffm.diag") != null)
+                System.out.println("[ffm] userAgent=" + uaName);
+            ObjC.callVoid(w.configuration, "setProcessPool:", sharedProcessPool());
+            ObjC.callVoidBool(w.configuration, "setSuppressesIncrementalRendering:", false);
+            ObjC.callVoidBool(w.configuration, "setAllowsAirPlayForMediaPlayback:", true);
+            if (ObjC.callBool(w.configuration, "respondsToSelector:",
+                    ObjC.sel("setLimitsNavigationsToAppBoundDomains:")))
+                ObjC.callVoidBool(w.configuration, "setLimitsNavigationsToAppBoundDomains:", false);
+            if (ObjC.callBool(w.configuration, "respondsToSelector:",
+                    ObjC.sel("setMediaTypesRequiringUserActionForPlayback:")))
+                ObjC.callVoidInt(w.configuration, "setMediaTypesRequiringUserActionForPlayback:", 0);
+            if (ObjC.callBool(w.view != null ? w.view : w.configuration, "respondsToSelector:",
+                    ObjC.sel("setInspectable:"))) { /* applied after view creation below */ }
+
             MemorySegment ua = (MemorySegment) ObjC.sendAddress(0).invoke(
                     ObjC.cls("WKPreferences"), ObjC.sel("new"));
             ObjC.callVoidBool(ua, "setJavaScriptCanOpenWindowsAutomatically:", true);
             enablePopoverAttribute(ua);
+            if (ObjC.callBool(ua, "respondsToSelector:", ObjC.sel("setElementFullscreenEnabled:")))
+                ObjC.callVoidBool(ua, "setElementFullscreenEnabled:", true);
+            if (ObjC.callBool(ua, "respondsToSelector:", ObjC.sel("setSiteSpecificQuirksModeEnabled:")))
+                ObjC.callVoidBool(ua, "setSiteSpecificQuirksModeEnabled:", true);
+            if (ObjC.callBool(ua, "respondsToSelector:", ObjC.sel("setTextInteractionEnabled:")))
+                ObjC.callVoidBool(ua, "setTextInteractionEnabled:", true);
             ObjC.callVoid(w.configuration, "setPreferences:", ua);
 
             w.contentController = ObjC.allocInit(ObjC.cls("WKUserContentController"));
@@ -129,6 +152,8 @@ public final class FFMWKWebView {
                             ValueLayout.ADDRESS, ObjC.CGRect, ValueLayout.ADDRESS));
             w.view = (MemorySegment) initView.invoke(
                     viewAlloc, ObjC.sel("initWithFrame:configuration:"), bounds, w.configuration);
+            if (ObjC.callBool(w.view, "respondsToSelector:", ObjC.sel("setInspectable:")))
+                ObjC.callVoidBool(w.view, "setInspectable:", true);
             ObjC.callVoid(w.view, "setNavigationDelegate:", w.controller);
             ObjC.callVoid(w.view, "setUIDelegate:", w.controller);
             ObjC.callVoidInt(w.view, "setAutoresizingMask:", 18); // width|height sizable
@@ -375,6 +400,33 @@ public final class FFMWKWebView {
             if (System.getProperty("rigel.ffm.diag") != null)
                 System.out.println("[ffm] proxy configured port=" + port + " mode=" + mode);
         } catch (Throwable ignored) {}
+    }
+
+    private static volatile MemorySegment sharedPool;
+
+    private static synchronized MemorySegment sharedProcessPool() {
+        if (sharedPool == null) {
+            MemorySegment pool = ObjC.allocInit(ObjC.cls("WKProcessPool"));
+            ObjC.callVoid(pool, "retain");
+            sharedPool = pool;
+        }
+        return sharedPool;
+    }
+
+    private static String safariApplicationName() {
+        try {
+            MemorySegment dict = (MemorySegment) ObjC.sendAddress(1).invoke(
+                    ObjC.cls("NSDictionary"), ObjC.sel("dictionaryWithContentsOfFile:"),
+                    ObjC.nsString("/Applications/Safari.app/Contents/Info.plist"));
+            if (dict != null && dict.address() != 0) {
+                String version = ObjC.javaString((MemorySegment) ObjC.sendAddress(1).invoke(
+                        dict, ObjC.sel("objectForKey:"),
+                        ObjC.nsString("CFBundleShortVersionString")));
+                if (version != null && !version.isBlank())
+                    return "Version/" + version + " Safari/605.1.15";
+            }
+        } catch (Throwable ignored) {}
+        return "Version/18.0 Safari/605.1.15";
     }
 
     private static void enablePopoverAttribute(MemorySegment preferences) {
