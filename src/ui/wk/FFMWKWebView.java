@@ -709,6 +709,12 @@ public final class FFMWKWebView {
                     FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS),
                     "@@:@@@@");
+            ObjC.addMethod(c, "webView:runOpenPanelWithParameters:initiatedByFrame:completionHandler:",
+                    ObjC.staticHandle(FFMWKWebView.class, "runOpenPanel",
+                            MethodType.methodType(void.class, MemorySegment.class, MemorySegment.class,
+                                    MemorySegment.class, MemorySegment.class, MemorySegment.class, MemorySegment.class)),
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS), "v@:@@@@");
             ObjC.addMethod(c, "webViewWebContentProcessDidTerminate:",
                     ObjC.staticHandle(FFMWKWebView.class, "processTerminated",
                             MethodType.methodType(void.class, MemorySegment.class, MemorySegment.class, MemorySegment.class)),
@@ -836,6 +842,40 @@ public final class FFMWKWebView {
                             ValueLayout.ADDRESS), ObjC.GLOBAL);
             ObjC.callVoid(w.view, "startDownloadUsingRequest:completionHandler:", request, block);
         } catch (Throwable ignored) {}
+    }
+
+    /** WKUIDelegate file-upload panel: <input type="file"> support. */
+    public static void runOpenPanel(MemorySegment self, MemorySegment cmd, MemorySegment webView,
+                                    MemorySegment parameters, MemorySegment frame,
+                                    MemorySegment completion) {
+        try {
+            MemorySegment panelClass = (MemorySegment) ObjC.sendAddress(0).invoke(
+                    ObjC.cls("NSOpenPanel"), ObjC.sel("openPanel"));
+            ObjC.callVoidBool(panelClass, "setCanChooseFiles:", true);
+            ObjC.callVoidBool(panelClass, "setCanChooseDirectories:", false);
+            if (parameters != null && parameters.address() != 0) {
+                boolean multiple = ObjC.callBool(parameters, "allowsMultipleSelection");
+                ObjC.callVoidBool(panelClass, "setAllowsMultipleSelection:", multiple);
+            }
+            int result = ObjC.callInt(panelClass, "runModal");
+            MemorySegment urls = (MemorySegment) ObjC.sendAddress(0).invoke(panelClass, ObjC.sel("URLs"));
+            if (result != 1 || urls == null || urls.address() == 0) urls = ObjC.call0(
+                    (MemorySegment) ObjC.sendAddress(0).invoke(ObjC.cls("NSArray"), ObjC.sel("array")),
+                    "self");
+            MemorySegment invokePtr = completion.reinterpret(32).get(ValueLayout.ADDRESS, 16L);
+            MethodHandle invoke = ObjC.LINKER.downcallHandle(invokePtr,
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+            invoke.invoke(completion, urls);
+        } catch (Throwable t) {
+            // Never leave a file chooser completion uncalled — WebKit throws
+            // an internal exception if it never receives the callback.
+            try {
+                MemorySegment invokePtr = completion.reinterpret(32).get(ValueLayout.ADDRESS, 16L);
+                MethodHandle invoke = ObjC.LINKER.downcallHandle(invokePtr,
+                        FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+                invoke.invoke(completion, MemorySegment.NULL);
+            } catch (Throwable ignored) {}
+        }
     }
 
     public static MemorySegment createPopup(MemorySegment self, MemorySegment cmd,

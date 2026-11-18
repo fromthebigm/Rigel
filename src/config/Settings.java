@@ -65,6 +65,7 @@ public class Settings {
     private static final String K_AV1_NORMALIZE_ALL = "media.av1.normalize.all-sites";
     private static final String K_WEB_INPUT_SITE_MODES = "input.web.site.modes";
     private static final String K_DOMAIN_FRONTING = "proxy.domain.fronting";
+    private static final String K_DOCK_ICON     = "dock.icon.path";
 
     private final Properties props = new Properties();
     private int batchDepth;
@@ -215,6 +216,13 @@ public class Settings {
                 Paths.get(System.getProperty("user.home"), "Downloads").toString());
     }
     public void setDownloadDir(String v) { props.setProperty(K_DOWNLOAD_DIR, v); save(); }
+
+    public String getDockIconPath() { return props.getProperty(K_DOCK_ICON, ""); }
+    public void setDockIconPath(String v) {
+        if (v == null || v.isBlank()) props.remove(K_DOCK_ICON);
+        else props.setProperty(K_DOCK_ICON, v);
+        save();
+    }
 
     public boolean isAskBeforeDownload() {
         return Boolean.parseBoolean(props.getProperty(K_ASK_DOWNLOAD, "true"));

@@ -2661,6 +2661,7 @@ public class BrowserUI {
             case COPY -> text.copy();
             case PASTE -> text.paste();
             case SELECT_ALL -> text.selectAll();
+            case UNDO, REDO, DELETE -> { } // SWT Text handles undo itself
         }
         return true;
     }
@@ -3964,6 +3965,18 @@ public class BrowserUI {
             if (idx >= 0 && idx < count) tabManager.switchTo(idx);
         } else if (shift && key(e, 'c')) {
             copyToClipboard(currentUrl());
+        } else if (!shift && key(e, 'c')) {
+            performEditAction(RigelBrowser.EditAction.COPY);
+        } else if (!shift && key(e, 'x')) {
+            performEditAction(RigelBrowser.EditAction.CUT);
+        } else if (!shift && key(e, 'v')) {
+            performEditAction(RigelBrowser.EditAction.PASTE);
+        } else if (!shift && key(e, 'a')) {
+            performEditAction(RigelBrowser.EditAction.SELECT_ALL);
+        } else if (!shift && key(e, 'z')) {
+            performEditAction(RigelBrowser.EditAction.UNDO);
+        } else if (shift && key(e, 'z')) {
+            performEditAction(RigelBrowser.EditAction.REDO);
         } else {
             handled = false;
         }
@@ -4628,6 +4641,49 @@ public class BrowserUI {
         settingsLabel(genForm, "Search (%s = query)");
         Text searchText = settingsField(genForm, "https://www.google.com/search?q=%s");
         searchText.setText(settings.getSearchTemplate());
+
+        settingsLabel(genForm, "Dock icon");
+        Composite dockRow = new Composite(genForm, SWT.NONE);
+        dockRow.setBackground(colNavBg);
+        GridLayout dr = new GridLayout(3, false);
+        dr.marginWidth = 0; dr.horizontalSpacing = 8; dr.verticalSpacing = 0;
+        dockRow.setLayout(dr);
+        dockRow.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+        Label dockPath = new Label(dockRow, SWT.NONE);
+        dockPath.setBackground(colNavBg);
+        dockPath.setForeground(colTextMuted);
+        String persistedIcon = settings.getDockIconPath();
+        dockPath.setText(persistedIcon == null || persistedIcon.isBlank()
+                ? "Default Weather icon" : "Custom: " + persistedIcon);
+        dockPath.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+        Button pickDock = new Button(dockRow, SWT.PUSH);
+        pickDock.setText("Choose…");
+        pickDock.addListener(SWT.Selection, e -> {
+            FileDialog dialog = new FileDialog(shell, SWT.OPEN);
+            dialog.setText("Choose Dock icon");
+            dialog.setFilterExtensions(new String[]{"*.png;*.icns;*.jpg;*.jpeg", "*.*"});
+            String chosen = dialog.open();
+            if (chosen == null || chosen.isBlank()) return;
+            try {
+                java.nio.file.Path target = config.Settings.DIR.resolve("dock-icon.png");
+                java.nio.file.Files.createDirectories(config.Settings.DIR);
+                java.nio.file.Files.copy(java.nio.file.Path.of(chosen), target,
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                String saved = target.toString();
+                settings.setDockIconPath(saved);
+                dockPath.setText("Custom: " + saved);
+                config.DockIcon.apply(shell.getDisplay());
+            } catch (Exception failure) {
+                showError(shell, "Could not set Dock icon: " + failure.getMessage());
+            }
+        });
+        Button resetDock = new Button(dockRow, SWT.PUSH);
+        resetDock.setText("Reset");
+        resetDock.addListener(SWT.Selection, e -> {
+            settings.setDockIconPath(null);
+            dockPath.setText("Default Weather icon");
+            config.DockIcon.apply(shell.getDisplay());
+        });
         Button restoreTabs = new Button(genForm, SWT.CHECK);
         restoreTabs.setText("Restore tabs from last session");
         restoreTabs.setBackground(colNavBg); restoreTabs.setForeground(colTextPrimary);

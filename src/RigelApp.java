@@ -1,16 +1,8 @@
-import java.io.InputStream;
-import java.nio.file.Path;
-
-import org.eclipse.swt.graphics.Image;
-import org.eclipse.swt.widgets.TaskBar;
-import org.eclipse.swt.widgets.TaskItem;
 import org.eclipse.swt.widgets.Display;
-import org.eclipse.swt.widgets.Shell;
 import ui.BrowserApplication;
 
 public class RigelApp {
-    /** First http/https-ish argv, for launcher deep links ("open THIS page").
-     *  A bare host gets an https scheme; anything else is not a URL arg. */
+    /** First http/https-ish argv, for launcher deep links ("open THIS page"). */
     private static String pickUrlArg(String[] args) {
         if (args == null) return null;
         for (String arg : args) {
@@ -26,30 +18,16 @@ public class RigelApp {
         for (int i = 0; i < args.length - 1; i++) {
             if ("--shot".equals(args[i])) System.setProperty("rigel.shot.path", args[i + 1]);
         }
-        // The dock-identity dylib (presentation swizzling + BigM product-key
-        // gate) is no longer loaded. Rigel now runs from plain classes with
-        // no native identity shim: the Java/SWT identity settings below carry
-        // the "Google Chrome" presentation name, and the dock icon is applied
-        // through SWT's TaskBar API. The adaptive light/dark dock icon and the
-        // standalone product-key gate are intentionally dropped with the dylib.
+        // No identity dylib: Java/SWT identity settings carry the presentation
+        // name, and the Dock icon comes from config.DockIcon (custom or bundled).
         System.setProperty("apple.awt.application.name", "Google Chrome");
         Display.setAppName("Google Chrome");
         Display.setAppVersion("1.0");
         Display display = new Display();
-        Image dockIcon = null;
+        config.DockIcon.apply(display);
         try {
-            try (InputStream stream = RigelApp.class.getResourceAsStream("/weather-icon.png")) {
-                if (stream != null) {
-                    dockIcon = new Image(display, stream);
-                    TaskBar taskBar = display.getSystemTaskBar();
-                    TaskItem appItem = taskBar == null ? null : taskBar.getItem((Shell) null);
-                    if (appItem != null) appItem.setImage(dockIcon);
-                }
-            } catch (Exception ignored) {
-            }
             new BrowserApplication(display).run(pickUrlArg(args));
         } finally {
-            if (dockIcon != null && !dockIcon.isDisposed()) dockIcon.dispose();
             if (!display.isDisposed()) display.dispose();
         }
     }

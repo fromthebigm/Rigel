@@ -37,10 +37,15 @@ public final class RigelBrowser extends Composite {
             new java.util.concurrent.atomic.AtomicBoolean();
 
     public enum EditAction {
-        CUT(1, "cut"),
-        COPY(2, "copy"),
-        PASTE(3, "paste"),
-        SELECT_ALL(4, "selectAll");
+        // Indices match FFMWKWebView.editAction selector table:
+        // 0 undo:, 1 redo:, 2 cut:, 3 copy:, 4 paste:, 5 selectAll:, 6 delete:
+        UNDO(0, "undo"),
+        REDO(1, "redo"),
+        CUT(2, "cut"),
+        COPY(3, "copy"),
+        PASTE(4, "paste"),
+        SELECT_ALL(5, "selectAll"),
+        DELETE(6, "delete");
 
         final int nativeCode;
         final String command;
