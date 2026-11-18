@@ -49,6 +49,7 @@ public final class FFMWKWebView {
         boolean askBeforeDownload;
         final Map<String, MemorySegment> downloads = new ConcurrentHashMap<>();
         final java.util.concurrent.atomic.AtomicInteger downloadSeq = new java.util.concurrent.atomic.AtomicInteger();
+        final java.util.concurrent.atomic.AtomicInteger contentRuleGeneration = new java.util.concurrent.atomic.AtomicInteger();
     }
 
     private static final class DelegateRegistry {
@@ -118,6 +119,7 @@ public final class FFMWKWebView {
                         ObjC.nsString(name));
             }
             installUserScripts(w);
+            if (w.contentBlocking != 0) configureContentBlocking(w, true);
 
             MemorySegment bounds = ObjC.rect(ObjC.GLOBAL, 0, 0, 1, 1);
             MemorySegment viewAlloc = (MemorySegment) ObjC.sendAddress(0).invoke(
@@ -281,7 +283,41 @@ public final class FFMWKWebView {
     }
 
     public static void evalDone(long token, MemorySegment block, MemorySegment result, MemorySegment error) {
-        String value = result == null || result.address() == 0 ? "" : result.reinterpret(1 << 16).getString(0);
+        String value = "";
+        if (result != null && result.address() != 0) {
+            try {
+                if (ObjC.callBool(result, "isKindOfClass:", ObjC.cls("NSString"))) {
+                    value = ObjC.javaString(result);
+                } else {
+                    MethodHandle jsonData = ObjC.LINKER.downcallHandle(ObjC.MSG_SEND,
+                            FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                                    ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                                    ValueLayout.JAVA_LONG, ValueLayout.ADDRESS));
+                    boolean valid = (boolean) jsonData.invoke(ObjC.cls("NSJSONSerialization"),
+                            ObjC.sel("isValidJSONObject:"), result);
+                    if (valid) {
+                        MemorySegment data = (MemorySegment) jsonData.invoke(
+                                ObjC.cls("NSJSONSerialization"),
+                                ObjC.sel("dataWithJSONObject:options:error:"),
+                                result, 0L, MemorySegment.NULL);
+                        if (data != null && data.address() != 0) {
+                            MemorySegment alloc = (MemorySegment) ObjC.sendAddress(0).invoke(
+                                    ObjC.cls("NSString"), ObjC.sel("alloc"));
+                            MethodHandle initStr = ObjC.LINKER.downcallHandle(ObjC.MSG_SEND,
+                                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                                            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
+                            MemorySegment ns = (MemorySegment) initStr.invoke(alloc,
+                                    ObjC.sel("initWithData:encoding:"), data, 4L);
+                            value = ObjC.javaString(ns);
+                        }
+                    } else {
+                        value = ObjC.javaString(ObjC.call0(result, "description"));
+                    }
+                }
+            } catch (Throwable t) {
+                value = ObjC.javaString(ObjC.call0(result, "description"));
+            }
+        }
         String err = "";
         if (error != null && error.address() != 0) {
             err = ObjC.javaString((MemorySegment) ObjC.call0(error, "localizedDescription"));
@@ -416,8 +452,78 @@ public final class FFMWKWebView {
     }
 
     public static void setContentBlocking(long handle, int enabled) {
-        get(handle).contentBlocking = enabled;
-        // Content rule lists are installed in installUserScripts when enabled.
+        WebView w = get(handle);
+        w.contentBlocking = enabled;
+        configureContentBlocking(w, enabled != 0);
+    }
+
+    private static void configureContentBlocking(WebView w, boolean enabled) {
+        try {
+            MemorySegment rules = (MemorySegment) ObjC.sendAddress(0).invoke(
+                    w.contentController, ObjC.sel("removeAllContentRuleLists"));
+            if (!enabled) return;
+            int generation = w.contentRuleGeneration.incrementAndGet();
+            MemorySegment store = (MemorySegment) ObjC.sendAddress(0).invoke(
+                    ObjC.cls("WKContentRuleListStore"), ObjC.sel("defaultStore"));
+            MemorySegment block = ObjC.block(
+                    ObjC.staticHandle(FFMWKWebView.class, "contentRulesCompiled",
+                            MethodType.methodType(void.class, int.class, MemorySegment.class,
+                                    MemorySegment.class, MemorySegment.class)),
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS), ObjC.GLOBAL);
+            // Bind generation and view token into the upcall.
+            java.lang.invoke.MethodHandle bound = java.lang.invoke.MethodHandles.insertArguments(
+                    ObjC.staticHandle(FFMWKWebView.class, "contentRulesCompiled",
+                            MethodType.methodType(void.class, int.class, long.class,
+                                    MemorySegment.class, MemorySegment.class, MemorySegment.class)),
+                    0, generation, w.token);
+            MemorySegment boundBlock = ObjC.block(bound,
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS), ObjC.GLOBAL);
+            ObjC.callVoid(store, "compileContentRuleListForIdentifier:encodedContentRuleList:completionHandler:",
+                    ObjC.nsString("com.rigel.builtin-content-blocker.v1"),
+                    ObjC.nsString(CONTENT_RULES_JSON), boundBlock);
+        } catch (Throwable ignored) {}
+    }
+
+    public static void contentRulesCompiled(int generation, long token,
+                                            MemorySegment block, MemorySegment ruleList,
+                                            MemorySegment error) {
+        WebView w = HANDLES.values().stream().filter(v -> v.token == token).findFirst().orElse(null);
+        if (w == null || w.contentBlocking == 0 || w.contentRuleGeneration.get() != generation
+                || w.destroyed || ruleList == null || ruleList.address() == 0) return;
+        try {
+            ObjC.callVoid(w.contentController, "addContentRuleList:", ruleList);
+            ObjC.callVoid(w.view, "reload");
+        } catch (Throwable ignored) {}
+    }
+
+    private static final String CONTENT_RULES_JSON = buildContentRules();
+
+    private static String buildContentRules() {
+        String[] domains = {"*2mdn.net", "*adform.net", "*adnxs.com", "*ads-twitter.com",
+                "*adsafeprotected.com", "*adsrvr.org", "*adzerk.net", "*advertising.com",
+                "*amazon-adsystem.com", "*app-measurement.com", "*bidswitch.net", "*bluekai.com",
+                "*casalemedia.com", "*chartbeat.com", "*clarity.ms", "*criteo.com", "*criteo.net",
+                "*demdex.net", "*doubleclick.net", "*everesttech.net", "*eyeota.net",
+                "*flashtalking.com", "*hotjar.com", "*imrworldwide.com", "*krxd.net",
+                "*lijit.com", "*mathtag.com", "*media.net", "*mixpanel.com", "*moatads.com",
+                "*newrelic.com", "*openx.net", "*optimizely.com", "*outbrain.com",
+                "*pubmatic.com", "*quantserve.com", "*rlcdn.com", "*rubiconproject.com",
+                "*scorecardresearch.com", "*segment.com", "*segment.io", "*serving-sys.com",
+                "*sharethrough.com", "*smartadserver.com", "*spotxchange.com", "*taboola.com",
+                "*tapad.com", "*teads.tv", "*tradedoubler.com", "*undertone.com",
+                "*yieldmanager.com", "*yieldmo.com", "*zedo.com"};
+        StringBuilder d = new StringBuilder();
+        for (int i = 0; i < domains.length; i++) {
+            if (i > 0) d.append(',');
+            d.append('"').append(domains[i]).append('"');
+        }
+        return "[{\"trigger\":{\"url-filter\":\".*\",\"if-domain\":[" + d + "]},"
+                + "\"action\":{\"type\":\"block\"}},"
+                + "{\"trigger\":{\"url-filter\":\".*\"},\"action\":{\"type\":\"css-display-none\","
+                + "\"selector\":\".adsbygoogle,[data-ad-client],[id^='google_ads_'],"
+                + "[id^='div-gpt-ad']\"}}]";
     }
 
     public static void setDownloadOptions(long handle, String directory, boolean ask) {
@@ -433,7 +539,8 @@ public final class FFMWKWebView {
         if (download == null || download.address() == 0) return 0;
         try {
             ObjC.callVoid(download, "cancel");
-            w.events.script(w.token, "rigelDownloadEvent", "cancelled|" + identifier);
+            w.events.script(w.token, "rigelDownloadEvent",
+                    downloadPayload(w, "cancelled", identifier, download, ""));
             return 1;
         } catch (Throwable t) { return 0; }
     }
@@ -667,10 +774,11 @@ public final class FFMWKWebView {
             if (nsUrl == null || nsUrl.address() == 0) return;
             MemorySegment request = (MemorySegment) ObjC.sendAddress(1).invoke(ObjC.cls("NSURLRequest"),
                     ObjC.sel("requestWithURL:"), nsUrl);
-            MemorySegment block = ObjC.block(
+            java.lang.invoke.MethodHandle boundStart = java.lang.invoke.MethodHandles.insertArguments(
                     ObjC.staticHandle(FFMWKWebView.class, "downloadStarted",
-                            MethodType.methodType(void.class, MemorySegment.class,
-                                    MemorySegment.class, MemorySegment.class)),
+                            MethodType.methodType(void.class, long.class, MemorySegment.class,
+                                    MemorySegment.class, MemorySegment.class)), 0, w.token);
+            MemorySegment block = ObjC.block(boundStart,
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS), ObjC.GLOBAL);
             ObjC.callVoid(w.view, "startDownloadUsingRequest:completionHandler:", request, block);
@@ -739,18 +847,49 @@ public final class FFMWKWebView {
         }
     }
 
-    public static void downloadStarted(MemorySegment block, MemorySegment download, MemorySegment error) {
-        for (WebView w : HANDLES.values()) {
-            if (download != null && download.address() != 0) {
-                String id = "dl-" + w.downloadSeq.incrementAndGet();
-                w.downloads.put(id, download);
-                ObjC.callVoid(download, "setDelegate:", w.controller);
-                if (w.events != null) w.events.script(w.token, "rigelDownloadEvent", "started|" + id);
-                startProgressPoller(w, id, download);
-            } else if (w.events != null) {
-                w.events.script(w.token, "rigelDownloadEvent", "failed|" + ObjC.javaString(error));
-            }
+    public static void downloadStarted(long token, MemorySegment block,
+                                       MemorySegment download, MemorySegment error) {
+        WebView w = HANDLES.values().stream().filter(v -> v.token == token).findFirst().orElse(null);
+        if (w == null) return;
+        if (download != null && download.address() != 0) {
+            String id = "dl-" + w.downloadSeq.incrementAndGet();
+            w.downloads.put(id, download);
+            ObjC.callVoid(download, "setDelegate:", w.controller);
+            if (w.events != null)
+                w.events.script(w.token, "rigelDownloadEvent",
+                        downloadPayload(w, "started", id, download, ""));
+            startProgressPoller(w, id, download);
+        } else if (w.events != null) {
+            w.events.script(w.token, "rigelDownloadEvent",
+                    payload("failed", "", "", "", "", "0", "0", ObjC.javaString(error)));
         }
+    }
+
+    private static String downloadPayload(WebView w, String event, String id,
+                                          MemorySegment download, String extra) {
+        String name = "", url = "", path = "";
+        long completed = 0, total = 0;
+        try {
+            MemorySegment request = ObjC.call0(download, "originalRequest");
+            MemorySegment nsUrl = ObjC.call0(request, "URL");
+            url = ObjC.javaString(ObjC.call0(nsUrl, "absoluteString"));
+            name = ObjC.javaString(ObjC.call0(nsUrl, "lastPathComponent"));
+            MemorySegment progress = ObjC.call0(download, "progress");
+            completed = (long) ObjC.callDouble(progress, "completedUnitCount");
+            total = (long) ObjC.callDouble(progress, "totalUnitCount");
+        } catch (Throwable ignored) {}
+        return payload(event, id, name, url, path, String.valueOf(completed),
+                String.valueOf(total), extra);
+    }
+
+    private static String payload(String... parts) {
+        StringBuilder b = new StringBuilder();
+        for (int i = 0; i < parts.length; i++) {
+            if (i > 0) b.append('|');
+            b.append(java.net.URLEncoder.encode(parts[i] == null ? "" : parts[i],
+                    java.nio.charset.StandardCharsets.UTF_8));
+        }
+        return b.toString();
     }
 
     private static void startProgressPoller(WebView w, String id, MemorySegment download) {
@@ -762,7 +901,7 @@ public final class FFMWKWebView {
                         double fraction = ObjC.callDouble(progress, "fractionCompleted");
                         if (w.events != null)
                             w.events.script(w.token, "rigelDownloadEvent",
-                                    "progress|" + id + "|" + (int) Math.round(fraction * 100));
+                                    downloadPayload(w, "progress", id, download, ""));
                     }
                     Thread.sleep(500);
                 } catch (Throwable ignored) { break; }
@@ -790,7 +929,8 @@ public final class FFMWKWebView {
             WebView w = owner(self);
             String id = downloadId(w, download);
             if (w != null && w.events != null)
-                w.events.script(w.token, "rigelDownloadEvent", "destination|" + id);
+                w.events.script(w.token, "rigelDownloadEvent",
+                        downloadPayload(w, "destination", id, download, ""));
             String name = ObjC.javaString(filename);
             if (name == null || name.isBlank()) name = "download";
             String dir = w == null ? System.getProperty("user.home") + "/Downloads" : w.downloadDirectory;
@@ -808,17 +948,20 @@ public final class FFMWKWebView {
     public static void downloadFinished(MemorySegment self, MemorySegment cmd, MemorySegment download) {
         WebView w = owner(self);
         String id = downloadId(w, download);
+        if (w != null && w.events != null)
+            w.events.script(w.token, "rigelDownloadEvent",
+                    downloadPayload(w, "finished", id, download, ""));
         if (w != null) w.downloads.remove(id);
-        if (w != null && w.events != null) w.events.script(w.token, "rigelDownloadEvent", "finished|" + id);
     }
 
     public static void downloadFailed(MemorySegment self, MemorySegment cmd, MemorySegment download,
                                        MemorySegment error, MemorySegment resumeData) {
         WebView w = owner(self);
         String id = downloadId(w, download);
-        if (w != null) w.downloads.remove(id);
         if (w != null && w.events != null)
-            w.events.script(w.token, "rigelDownloadEvent", "failed|" + id + "|" + ObjC.javaString(error));
+            w.events.script(w.token, "rigelDownloadEvent",
+                    downloadPayload(w, "failed", id, download, ObjC.javaString(error)));
+        if (w != null) w.downloads.remove(id);
     }
 
     public static boolean returnYes(MemorySegment self, MemorySegment cmd) { return true; }
