@@ -248,6 +248,14 @@ public final class BrowserApplication {
         BrowserUI window = new BrowserUI();
         windows.add(window);
         try {
+            String shotPath = System.getProperty("rigel.shot.path");
+            if (shotPath != null && !shotPath.isBlank()) {
+                final BrowserUI shotWindow = window;
+                display.timerExec(2500, () -> {
+                    boolean ok = ui.SelfCapture.capture(shotWindow.getShell(), shotPath);
+                    System.out.println("shot: " + (ok ? "wrote " + shotPath : "FAILED"));
+                });
+            }
             window.open(display, settings, bookmarks, history, proxyServer,
                     // Deliberately synchronous: a tear-off must add the new
                     // window to this list before the old (possibly now empty)

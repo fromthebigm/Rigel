@@ -23,6 +23,9 @@ public class RigelApp {
     }
 
     public static void main(String[] args) {
+        for (int i = 0; i < args.length - 1; i++) {
+            if ("--shot".equals(args[i])) System.setProperty("rigel.shot.path", args[i + 1]);
+        }
         // The dock-identity dylib (presentation swizzling + BigM product-key
         // gate) is no longer loaded. Rigel now runs from plain classes with
         // no native identity shim: the Java/SWT identity settings below carry

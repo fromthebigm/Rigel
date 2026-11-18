@@ -311,6 +311,7 @@ public class BrowserUI {
         display.disposeExec(this::disposeUiResources);
 
         shell = new Shell(display, SWT.SHELL_TRIM);
+        WindowChrome.transparentTitleBar(shell);
 
         try {
             long windowId = shell.view.window().id;
