@@ -19,7 +19,11 @@ if [[ -d "$DIR/jdk/Contents/Home" ]]; then
     fi
   done
 fi
-xattr -dr com.apple.quarantine "$DIR" 2>/dev/null || true
+# Only strip quarantine from app payloads; never touch .git (often contains
+# read-only objects after a copy, which produces useless xattr errors).
+xattr -dr com.apple.quarantine \
+  "$DIR/jdk" "$DIR/lib" "$DIR/target" "$DIR/build" "$DIR/resources" \
+  "$DIR"/*.sh "$DIR"/*.icns "$DIR"/*.png 2>/dev/null || true
 
 # Terminal exports its own bundle identity to child processes. If Java inherits
 # it, LaunchServices can keep treating Rigel as part of Terminal: Terminal stays

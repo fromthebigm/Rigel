@@ -9,6 +9,8 @@ import proxy.ProxyServer;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /** Owns the one SWT event loop and the resources shared by all browser windows. */
 public final class BrowserApplication {
@@ -25,6 +27,15 @@ public final class BrowserApplication {
     private volatile long lastCookieSnapshotOkAt;
     private static final int COOKIE_AUTOSAVE_MS = 45_000;
     private static final long COOKIE_AUTOSAVE_NANOS = COOKIE_AUTOSAVE_MS * 1_000_000L; // 45s
+
+    /** Cookie snapshots call into WebKit and pump the AppKit runloop; doing
+     *  that on the SWT thread stutters the UI for up to 10s when a completion
+     *  is slow. Autosaves therefore run on this daemon thread. */
+    private static final ExecutorService COOKIE_SAVER = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "RigelCookieAutosave");
+        t.setDaemon(true);
+        return t;
+    });
 
     public BrowserApplication(Display display) {
         this.display = display;
@@ -99,7 +110,7 @@ public final class BrowserApplication {
         Runnable tick = new Runnable() {
             public void run() {
                 if (display.isDisposed()) return;
-                saveCookies();
+                COOKIE_SAVER.execute(BrowserApplication.this::saveCookies);
                 display.timerExec(COOKIE_AUTOSAVE_MS, this);
             }
         };
