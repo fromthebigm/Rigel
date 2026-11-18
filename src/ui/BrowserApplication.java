@@ -6,6 +6,7 @@ import config.Settings;
 import org.eclipse.swt.widgets.Display;
 import proxy.Blocklist;
 import proxy.ProxyServer;
+import ui.wk.CookieBridge;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -120,6 +121,8 @@ public final class BrowserApplication {
     }
 
     private void saveCookiesAtShutdown() {
+        CookieBridge.markShuttingDown();
+        if (lastCookieSnapshotOkAt == 0) return; // no autosave landed yet; avoid a 10s wait at exit
         // The death-time WKHTTPCookieStore fetch races AppKit/WebKit teardown
         // and has been observed silently serving the OLD on-disk view: 161
         // live cookies on the main thread seconds earlier came back from the

@@ -13,10 +13,14 @@ public final class CookieBridge {
     private static volatile int remaining;
     private static volatile CountDownLatch saveLatch;
     private static volatile int saveOk;
+    private static volatile boolean shuttingDown;
+
+    public static void markShuttingDown() { shuttingDown = true; }
 
     private CookieBridge() {}
 
     static int save(String path) {
+        if (shuttingDown) return 0; // main queue may be gone; never block exit
         saveLatch = new CountDownLatch(1);
         saveOk = 0;
         if (!dispatchMain(path)) {
