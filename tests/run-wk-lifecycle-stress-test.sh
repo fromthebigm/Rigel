@@ -16,12 +16,16 @@ bin_contains() {
     grep -a -q -F -e "$1" "$2"
   fi
 }
-if bin_contains '_setExtensibleSSOEnabled:' "$ROOT/classes/native/libRigelWKWebView.dylib"; then
-  print -u2 "Unsafe AppSSO preference toggle is present in the native bridge"
-  exit 1
+if [[ -f "$ROOT/classes/native/libRigelWKWebView.dylib" ]]; then
+  if bin_contains '_setExtensibleSSOEnabled:' "$ROOT/classes/native/libRigelWKWebView.dylib"; then
+    print -u2 "Unsafe AppSSO preference toggle is present in the native bridge"
+    exit 1
+  fi
+  bin_contains 'decidePolicyForSOAuthorizationLoadWithCurrentPolicy:' \
+    "$ROOT/classes/native/libRigelWKWebView.dylib"
+else
+  print "No custom dylib — native bridge binary checks skipped (FFM host)"
 fi
-bin_contains 'decidePolicyForSOAuthorizationLoadWithCurrentPolicy:' \
-  "$ROOT/classes/native/libRigelWKWebView.dylib"
 "$JAVA_HOME/bin/javac" -encoding UTF-8 -Xlint:all \
   -cp "$ROOT/build/classes:$ROOT/lib/*" \
   -d "$OUT" "$ROOT/tests/java/ui/RigelWKLifecycleStressTest.java"
