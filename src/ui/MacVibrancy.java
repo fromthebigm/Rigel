@@ -193,14 +193,9 @@ final class MacVibrancy {
 
     /** Visual smoke test: pixel snapshot of the whole window (TCC-free). */
     static boolean windowSnapshot(Shell shell, String path) {
-        GlassBridge bridge = bridge();
-        Pointer window = windowPointer(shell);
-        if (bridge == null || window == null || path == null) return false;
-        try {
-            return bridge.rigel_window_snapshot(window, path) != 0;
-        } catch (Throwable ignored) {
-            return false;
-        }
+        // No custom dylib: capture the window in-process via CoreGraphics FFM.
+        if (shell == null || shell.isDisposed() || path == null) return false;
+        return ui.SelfCapture.capture(shell, path);
     }
 
     private static volatile GlassBridge glassBridge;
