@@ -710,7 +710,8 @@ public final class FFMWKWebView {
 
     private static String[] handlerNames() {
         return new String[]{"javaEnterFullscreen", "javaExitFullscreen", "rigelHomeNavigate",
-                "rigelClipboardWrite", "rigelDownload", "rigelEvent", "rigelDiagnostics"};
+                "rigelClipboardWrite", "rigelDownload", "rigelEvent", "rigelDiagnostics",
+                "rigelContext", "rigelOpen"};
     }
 
     private static WebView owner(MemorySegment self) {
