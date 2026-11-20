@@ -1,0 +1,5 @@
+#!/bin/sh
+# Launch Rigel as a regular macOS GUI process with a Dock tile, not the Java exec.
+set -e
+DIR="$(CDPATH= cd "$(dirname "$0")/../../.." && pwd -P)"
+exec "$DIR/run-rigel.sh" "$@"

@@ -39,6 +39,8 @@ public final class DockIcon {
                     ObjC.sel("initWithContentsOfFile:"), ObjC.nsString(file.toString()));
             if (image != null && image.address() != 0)
                 SET_ICON.invoke(app, ObjC.sel("setApplicationIconImage:"), image);
+            ObjC.callVoidInt(app, "setActivationPolicy:", 2); // regular
+            ObjC.callVoidBool(app, "activateIgnoringOtherApps:", true);
         } catch (Throwable ignored) {
         }
     }

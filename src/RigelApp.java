@@ -23,8 +23,11 @@ public class RigelApp {
         System.setProperty("apple.awt.application.name", "Google Chrome");
         Display.setAppName("Google Chrome");
         Display.setAppVersion("1.0");
+        // Apply the Dock icon and regular activation policy before AWT/Display
+        // initializes AppKit — Apple docs say late changes leave the generic
+        // executable tile on some unbundled Java processes.
+        config.DockIcon.apply();
         Display display = new Display();
-        config.DockIcon.apply(display);
         try {
             new BrowserApplication(display).run(pickUrlArg(args));
         } finally {
