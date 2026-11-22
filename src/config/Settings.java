@@ -42,6 +42,11 @@ public class Settings {
     private static final String K_SIDEBAR_WIDTH = "layout.sidebar.percent";
     private static final String K_THEME         = "theme";            // theme name, e.g. "Atelier", "Nebula", "Forest" …
     private static final String K_SEARCH        = "search.template";  // %s = query
+    private static final String K_SEARCH_ENGINE            = "search.engine";            // google|bing|ddg|brave|custom (see SearchEngines)
+    private static final String K_SEARCH_ENGINE_CUSTOM_URL   = "search.engine.custom.url";
+    private static final String K_SEARCH_ENGINE_CUSTOM_QUERY  = "search.engine.custom.query";
+    private static final String K_SEARCH_ENGINE_CUSTOM_NAME   = "search.engine.custom.name";
+    private static final String K_ENGINE_HOME_SHORTCUT        = "engine.homeShortcut";
     private static final String K_DOWNLOAD_DIR  = "download.dir";
     private static final String K_ASK_DOWNLOAD  = "download.ask";     // ask for path each time
     private static final String K_BLOCKLIST_ON  = "blocklist.enabled";
@@ -207,9 +212,88 @@ public class Settings {
     public void setTheme(String v) { props.setProperty(K_THEME, v); save(); }
 
     public String getSearchTemplate() {
-        return props.getProperty(K_SEARCH, "https://www.google.com/search?q=%s");
+        String legacy = props.getProperty(K_SEARCH);
+        if (legacy != null && SearchEngines.isValidSearchTemplate(legacy.trim())) return legacy.trim();
+        return SearchEngines.currentEngineOrGoogle(this).template;
+    }
+
+    // ── Search engines (structured; Settings → Search tab) ──────────────
+
+    /** Persisted default search engine id: google (default) | bing | ddg
+     *  | brave | custom. Unknown/blank values fall back to google. */
+    public String getSearchEngineId() {
+        String id = (props.getProperty(K_SEARCH_ENGINE, "google")
+                == null ? "" : props.getProperty(K_SEARCH_ENGINE, "google")).trim()
+                .toLowerCase(java.util.Locale.ROOT);
+        if ("duckduckgo".equals(id)) id = SearchEngines.ID_DDG;  // id used by the older engine-settings keys
+        if (id.isEmpty()) id = "google";
+        return id;
+    }
+
+    /** Persists the default search engine id. Clears the custom fields when
+     *  switching away from "custom". */
+    public void setSearchEngineId(String id) {
+        String v = id == null ? "" : id.trim().toLowerCase(java.util.Locale.ROOT);
+        boolean known = SearchEngines.CUSTOM.equals(v) || SearchEngines.namedEngines().stream()
+                .anyMatch(e -> e.id.equals(v));
+        String fid = (!known || v.isEmpty()) ? SearchEngines.GOOGLE : v;
+        runBatch(() -> {
+            props.setProperty(K_SEARCH_ENGINE, fid);
+            if (!SearchEngines.CUSTOM.equals(fid)) {
+                props.remove(K_SEARCH_ENGINE_CUSTOM_URL);
+                props.remove(K_SEARCH_ENGINE_CUSTOM_QUERY);
+                props.remove(K_SEARCH_ENGINE_CUSTOM_NAME);
+            }
+        });
+    }
+
+    public String getCustomEngineUrl() {
+        return props.getProperty(K_SEARCH_ENGINE_CUSTOM_URL, "");
+    }
+
+    public void setCustomEngineUrl(String v) {
+        props.setProperty(K_SEARCH_ENGINE_CUSTOM_URL, v == null ? "" : v.trim());
+        save();
+    }
+
+    public String getCustomEngineQueryParameter() {
+        String p = props.getProperty(K_SEARCH_ENGINE_CUSTOM_QUERY, "q").trim();
+        return p.isEmpty() ? "q" : p;
+    }
+
+    public void setCustomEngineQueryParameter(String v) {
+        props.setProperty(K_SEARCH_ENGINE_CUSTOM_QUERY, v == null ? "q" : v.trim());
+        save();
+    }
+
+    public String getCustomEngineName() {
+        return props.getProperty(K_SEARCH_ENGINE_CUSTOM_NAME, "");
+    }
+
+    public void setCustomEngineName(String v) {
+        props.setProperty(K_SEARCH_ENGINE_CUSTOM_NAME, v == null ? "" : v.trim());
+        save();
+    }
+
+    /** User-overridable home-page shortcut label for the selected engine
+     *  ("Engine" model field #4); empty uses the engine's default shortcut. */
+    public String getEngineHomeShortcut() {
+        String s = props.getProperty(K_ENGINE_HOME_SHORTCUT, "");
+        return s == null ? "" : s.trim();
+    }
+
+    public void setEngineHomeShortcut(String s) {
+        props.setProperty(K_ENGINE_HOME_SHORTCUT, s == null ? "" : s.trim());
+        save();
     }
     public void setSearchTemplate(String v) { props.setProperty(K_SEARCH, v); save(); }
+
+    /** @deprecated legacy engine accessor — use {@link #getSearchEngineId()}. */
+    @Deprecated
+    public String getSearchEngine() { return getSearchEngineId(); }
+    /** @deprecated legacy engine accessor — use {@link #setSearchEngineId(String)}. */
+    @Deprecated
+    public void setSearchEngine(String v) { setSearchEngineId(v); }
 
     public String getDownloadDir() {
         return props.getProperty(K_DOWNLOAD_DIR,

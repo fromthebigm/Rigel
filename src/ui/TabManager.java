@@ -176,6 +176,23 @@ public class TabManager {
                 sb.append("  </section>\n");
             }
         }
+        {
+            config.SearchEngines.Engine engine =
+                    config.SearchEngines.currentEngineOrGoogle(ui.settings());
+            if (engine != null && !engine.homeShortcut().isBlank()
+                    && !engine.baseUrl().isBlank()) {
+                sb.append("  <section class=\"quick-section\" aria-labelledby=\"engine-title\">\n");
+                sb.append("    <h2 class=\"section-label\" id=\"engine-title\">Search engines</h2>\n");
+                sb.append("    <ul class=\"quick-links\">\n");
+                sb.append("      <li><a class=\"quick-link\" href=\"").append(html(engine.baseUrl()))
+                      .append("\" title=\"Search the web with ").append(html(engine.name)).append("\"><span class=\"ql-icon\" aria-hidden=\"true\">")
+                      .append(html(engine.homeShortcut())).append("</span><span class=\"ql-copy\"><span class=\"ql-label\">")
+                      .append(html(engine.name)).append("</span><span class=\"ql-host\">").append(html(engine.baseUrl()))
+                      .append("</span></span></a></li>\n");
+                sb.append("    </ul>\n");
+                sb.append("  </section>\n");
+            }
+        }
         sb.append("  <footer class=\"key-hints\" aria-hidden=\"true\"><span><kbd>⌘ L</kbd>Address</span><span><kbd>⌘ T</kbd>New tab</span><span><kbd>⌘ K</kbd>Search</span></footer>\n");
         sb.append("</main>\n");
         sb.append("<script>\n");
@@ -1812,6 +1829,76 @@ public class TabManager {
             if (score > bestScore) { bestScore = score; best = url; }
         }
         return bestScore > 0 ? best : null;
+    }
+
+    /**
+     * Address-bar input → navigation URL, or null when nothing reasonable.
+     * Blank input opens the home page; explicit schemes navigate as-is;
+     * web-host lookalikes get an https scheme; anything else is searched via
+     * the configured search engine (Settings → Search tab).
+     */
+    public String resolveAddressInput(String input) {
+        String raw = input == null ? "" : input.trim();
+        if (raw.isEmpty()) return "rigel://home";
+        if ("rigel://home".equalsIgnoreCase(raw)) return "rigel://home";
+        if (raw.matches("^[a-z][a-z0-9+.-]*://.+$")) return raw;
+        if (looksLikeWebHost(raw)) return preferredSchemeForHost(raw) + raw;
+        return config.SearchEngines.searchUrl(
+                config.SearchEngines.currentEngineOrGoogle(ui.settings()), raw);
+    }
+
+    private boolean looksLikeWebHost(String raw) {
+        if (raw.isEmpty() || raw.chars().anyMatch(Character::isWhitespace)
+                || raw.indexOf('@') >= 0) return false;
+        try {
+            URI uri = URI.create("https://" + raw);
+            String host = uri.getHost();
+            if (host == null || host.isBlank()) return false;
+            String lowerHost = host.toLowerCase(java.util.Locale.ROOT);
+            return lowerHost.equals("localhost") || lowerHost.indexOf('.') >= 0
+                    || lowerHost.indexOf(':') >= 0;
+        } catch (IllegalArgumentException ex) {
+            return false;
+        }
+    }
+
+    private String preferredSchemeForHost(String raw) {
+        try {
+            String host = URI.create("http://" + raw).getHost();
+            return isLocalNetworkHost(host) ? "http://" : "https://";
+        } catch (IllegalArgumentException ex) {
+            return "https://";
+        }
+    }
+
+    private static boolean isLocalNetworkHost(String host) {
+        if (host == null || host.isBlank()) return false;
+        String value = host.toLowerCase(java.util.Locale.ROOT);
+        if (value.startsWith("[") && value.endsWith("]"))
+            value = value.substring(1, value.length() - 1);
+        if (value.equals("localhost") || value.endsWith(".local")
+                || value.endsWith(".lan") || value.endsWith(".home")
+                || value.endsWith(".internal") || value.endsWith(".localdomain")) return true;
+        if (value.indexOf(':') >= 0 && (value.equals("::1") || value.startsWith("fc")
+                || value.startsWith("fd") || value.startsWith("fe8")
+                || value.startsWith("fe9") || value.startsWith("fea")
+                || value.startsWith("feb"))) return true;
+        String[] octets = value.split("\\.", -1);
+        if (octets.length != 4) return false;
+        int[] address = new int[4];
+        try {
+            for (int i = 0; i < 4; i++) {
+                address[i] = Integer.parseInt(octets[i]);
+                if (address[i] < 0 || address[i] > 255) return false;
+            }
+        } catch (NumberFormatException ex) {
+            return false;
+        }
+        return address[0] == 10 || address[0] == 127
+                || (address[0] == 169 && address[1] == 254)
+                || (address[0] == 172 && address[1] >= 16 && address[1] <= 31)
+                || (address[0] == 192 && address[1] == 168)
+                || (address[0] == 100 && address[1] >= 64 && address[1] <= 127);
     }
 
     /**

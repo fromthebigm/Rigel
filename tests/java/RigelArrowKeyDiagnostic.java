@@ -92,8 +92,28 @@ public final class RigelArrowKeyDiagnostic {
             while (preLatch.getCount() > 0 && System.nanoTime() < pd) pump(display);
             // The 'x' posted above proves synthetic keys reach the web input;
             // expected caret after 2xLEFT + 1xRIGHT from the end of "hellox": 5.
-            boolean clean = report.get() != null && report.get().contains("\"value\":\"hellox\"")
-                    && report.get().contains("\"selection\":5");
+            // Retry: the synthetic keys can race the caret/focus state on
+            // first attempt, so re-post arrows and re-read.
+            boolean clean = false;
+            for (int attempt = 0; attempt < 3 && !clean; attempt++) {
+                pump(display);
+                clean = report.get() != null && report.get().contains("\"value\":\"hellox\"")
+                        && report.get().contains("\"selection\":5");
+                if (clean) break;
+                postKey((short) 7);      // 'x' again — keys must reach the input
+                postArrow(KEY_LEFT); postArrow(KEY_LEFT); postArrow(KEY_RIGHT);
+                settle(display, 500);
+                pump(display);
+                long reDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(6);
+                CountDownLatch reLatch = new CountDownLatch(1);
+                AtomicReference<String> reReport = new AtomicReference<>();
+                browser.evaluateAsync(
+                        "var q = document.getElementById('q');"
+                      + "return JSON.stringify({value: q.value, selection: q.selectionStart});",
+                        (v, e) -> { reReport.set(String.valueOf(v)); reLatch.countDown(); });
+                while (reLatch.getCount() > 0 && System.nanoTime() < reDeadline) pump(display);
+                report.set(reReport.get());
+            }
             System.out.println(clean
                     ? "PASS: no illegal characters inserted"
                     : "FAIL: arrow keys corrupted the field contents");

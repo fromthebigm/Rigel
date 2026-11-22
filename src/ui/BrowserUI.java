@@ -3849,19 +3849,19 @@ public class BrowserUI {
 
     /** Shared by the omnibox and the built-in new-tab page. */
     String resolveAddressInput(String input) {
+        if (tabManager != null) return tabManager.resolveAddressInput(input);
+        // Pre-tabManager fallback (rare; mirrors TabManager's logic).
         String raw = input == null ? "" : input.trim();
         if (raw.isEmpty()) return null;
         if (raw.equalsIgnoreCase("rigel://home")) return "rigel://home";
-
         String lower = raw.toLowerCase(java.util.Locale.ROOT);
         if (lower.startsWith("http://") || lower.startsWith("https://")) return raw;
         if (looksLikeWebHost(raw)) return preferredSchemeForHost(raw) + raw;
-
-        String query = java.net.URLEncoder.encode(
-                raw, java.nio.charset.StandardCharsets.UTF_8);
-        String template = validatedSearchTemplate();
-        return template.replace("%s", query);
+        return config.SearchEngines.searchUrl(
+                config.SearchEngines.currentEngineOrGoogle(settings), raw);
     }
+
+    config.Settings settings() { return settings; }
 
     private boolean looksLikeWebHost(String raw) {
         if (raw.isEmpty() || raw.chars().anyMatch(Character::isWhitespace)
@@ -3919,9 +3919,8 @@ public class BrowserUI {
     }
 
     private String validatedSearchTemplate() {
-        final String fallback = "https://www.google.com/search?q=%s";
-        String template = settings == null ? fallback : settings.getSearchTemplate();
-        return isValidSearchTemplate(template) ? template.trim() : fallback;
+        config.SearchEngines.Engine engine = config.SearchEngines.currentEngineOrGoogle(settings);
+        return engine != null && engine.template != null ? engine.template : "https://www.google.com/search?q=%s";
     }
 
     private static boolean isValidSearchTemplate(String template) {
@@ -4229,7 +4228,7 @@ public class BrowserUI {
         // source order below.
         for (String title : new String[]{
                 "General", "Appearance", "Layout", "Privacy",
-                "Downloads", "Shortcuts", "Gamepads", "Network"
+                "Search", "Downloads", "Shortcuts", "Gamepads", "Network"
         }) {
             TabItem item = new TabItem(tabs, SWT.NONE);
             item.setText(title);
@@ -4878,6 +4877,75 @@ public class BrowserUI {
             if (confirm.open() != SWT.YES) return;
             history.clear();
             presentStatus("History cleared");
+        });
+
+        // ── Search page ─────────────────────────────────────────────────
+        Composite searchPage = settingsPage(tabs, "Search", 1);
+        sectionHeader(searchPage, "Default engine");
+        Label searchHint = new Label(searchPage, SWT.WRAP);
+        searchHint.setText("Engine used when you type a search term into the address bar. Google is the default.");
+        searchHint.setBackground(colNavBg);
+        searchHint.setForeground(colTextMuted);
+        searchHint.setLayoutData(new GridData(SWT.FILL, SWT.TOP, true, false));
+
+        List<config.SearchEngines.Engine> engineOptions = config.SearchEngines.options();
+        Combo engineCombo = new Combo(searchPage, SWT.READ_ONLY);
+        for (config.SearchEngines.Engine e : engineOptions) engineCombo.add(e.name);
+        String currentId = settings.getSearchEngineId();
+        for (int i = 0; i < engineOptions.size(); i++) {
+            if (engineOptions.get(i).id.equals(currentId)) { engineCombo.select(i); break; }
+        }
+        engineCombo.setLayoutData(new GridData(SWT.FILL, SWT.TOP, true, false));
+
+        boolean customNow = config.SearchEngines.CUSTOM.equals(currentId);
+        Text customUrl = new Text(searchPage, SWT.BORDER);
+        customUrl.setLayoutData(new GridData(SWT.FILL, SWT.TOP, true, false));
+        customUrl.setBackground(colNavBg);
+        customUrl.setForeground(colTextPrimary);
+        customUrl.setVisible(customNow);
+        customUrl.setText(settings.getCustomEngineUrl());
+        Label customHint = new Label(searchPage, SWT.WRAP);
+        customHint.setText("Search URL — {query} or {q} or trailing ? is substituted with the query.");
+        customHint.setBackground(colNavBg);
+        customHint.setForeground(colTextMuted);
+        customHint.setLayoutData(new GridData(SWT.FILL, SWT.TOP, true, false));
+        customHint.setVisible(customNow);
+        Text customQuery = new Text(searchPage, SWT.BORDER);
+        customQuery.setLayoutData(new GridData(SWT.FILL, SWT.TOP, true, false));
+        customQuery.setBackground(colNavBg);
+        customQuery.setForeground(colTextPrimary);
+        customQuery.setVisible(customNow);
+        customQuery.setText(settings.getCustomEngineQueryParameter());
+        Button tryBtn = new Button(searchPage, SWT.PUSH);
+        tryBtn.setText("Try search");
+        tryBtn.setLayoutData(new GridData(SWT.LEFT, SWT.CENTER, false, false));
+        tryBtn.addListener(SWT.Selection, ev -> {
+            config.SearchEngines.Engine engine = config.SearchEngines.currentEngineOrGoogle(settings);
+            if (engine != null) {
+                String url = engine.searchUrl("hello rigel");
+                if (url != null) {
+                    tabManager.navigate(url);
+                    presentStatus("Search engine: " + engine.name);
+                }
+            }
+        });
+
+        engineCombo.addSelectionListener(new org.eclipse.swt.events.SelectionAdapter() {
+            @Override public void widgetSelected(org.eclipse.swt.events.SelectionEvent e) {
+                int idx = engineCombo.getSelectionIndex();
+                if (idx < 0 || idx >= engineOptions.size()) return;
+                config.SearchEngines.Engine engine = engineOptions.get(idx);
+                boolean isCustom = engine.editable;
+                settings.setSearchEngineId(engine.id);
+                if (isCustom) {
+                    settings.setCustomEngineUrl(customUrl.getText().trim());
+                    settings.setCustomEngineQueryParameter(customQuery.getText().trim());
+                }
+                customUrl.setVisible(isCustom);
+                customHint.setVisible(isCustom);
+                customQuery.setVisible(isCustom);
+                searchPage.layout(true, true);
+            }
         });
 
         // ── Buttons ─────────────────────────────────────────────────────
