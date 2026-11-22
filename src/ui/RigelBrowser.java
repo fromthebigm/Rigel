@@ -83,6 +83,7 @@ public final class RigelBrowser extends Composite {
     private Browser swtBrowser;
     private OpenHandler openHandler;
     private CloseHandler closeHandler;
+    private final List<Runnable> nativeClosedListeners = new java.util.concurrent.CopyOnWriteArrayList<>();
     private String currentUrl = "about:blank";
     private String currentTitle = "";
     private boolean contentProcessReloadPending;
@@ -350,6 +351,10 @@ public final class RigelBrowser extends Composite {
     public void setOpenHandler(OpenHandler handler) { openHandler = handler; }
     public void setCloseHandler(CloseHandler handler) { closeHandler = handler; }
 
+    /** Listeners fired when WebKit reports the view closed (webViewDidClose).
+     *  Fired on the SWT main thread right after closeHandler. */
+    public void addNativeClosedListener(Runnable listener) { nativeClosedListeners.add(listener); }
+
     public void addScriptFunction(String name, ScriptFunction function) {
         scriptFunctions.put(name, function);
         if (backend == Backend.SWT) {
@@ -387,7 +392,10 @@ public final class RigelBrowser extends Composite {
                 for (ProgressListener listener : List.copyOf(progressListeners)) listener.completed();
             }
             case MacWKWebView.LOCATION -> updateLocationAndTitle(first, second, true);
-            case MacWKWebView.CLOSED -> { if (closeHandler != null) closeHandler.close(); }
+            case MacWKWebView.CLOSED -> {
+                if (closeHandler != null) closeHandler.close();
+                for (Runnable listener : List.copyOf(nativeClosedListeners)) listener.run();
+            }
             case MacWKWebView.PROCESS_RESTARTED -> {
                 contentProcessReloadPending = true;
                 System.err.println("[Rigel] WKWebView content process restarted");

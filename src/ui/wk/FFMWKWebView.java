@@ -32,6 +32,7 @@ public final class FFMWKWebView {
     private static volatile boolean delegatesInstalled;
     private static volatile long proxyPort = 8888;
     private static volatile int proxyMode = 0;
+    private static volatile String proxyHost;
     private static volatile boolean proxyConfigured;
 
     private FFMWKWebView() {}
@@ -47,6 +48,12 @@ public final class FFMWKWebView {
         volatile int normalizeAv1, contentBlocking;
         String downloadDirectory = System.getProperty("user.home") + "/Downloads";
         boolean askBeforeDownload;
+        /** Destination path chosen in downloadDecideDestination, used by
+         *  downloadPayload so the "destination" event carries the real path
+         *  (deduped against existing files). */
+        final Map<String, String> destTargets = new ConcurrentHashMap<>();
+        /** Shared WKWebsiteDataStore backing this view (owned by us). */
+        MemorySegment dataStore;
         final Map<String, MemorySegment> downloads = new ConcurrentHashMap<>();
         final java.util.concurrent.atomic.AtomicInteger downloadSeq = new java.util.concurrent.atomic.AtomicInteger();
         final java.util.concurrent.atomic.AtomicInteger contentRuleGeneration = new java.util.concurrent.atomic.AtomicInteger();
@@ -76,7 +83,23 @@ public final class FFMWKWebView {
     }
 
     public static void setProxyPort(int port) { proxyPort = port; proxyConfigured = true; }
-    public static void setProxy(int port, int mode) { proxyPort = port; proxyMode = mode; proxyConfigured = true; }
+    public static void setProxy(int port, int mode) { setProxyForAllViews(proxyHost, port, mode); }
+    public static void setProxyHost(String host) { proxyHost = host; }
+
+    /** Pushes a new proxy config onto every live view's WKWebsiteDataStore
+     *  (live-update on Settings change; parity with rigel_wk_set_proxy) and
+     *  refreshes the statics used when creating new views. */
+    public static void setProxyForAllViews(String host, int port, int mode) {
+        proxyHost = host;
+        proxyPort = port;
+        proxyMode = mode;
+        proxyConfigured = port > 0;
+        for (WebView w : HANDLES.values())
+            try {
+                if (w.dataStore != null && w.dataStore.address() != 0)
+                    configureProxy(w.dataStore, port, mode);
+            } catch (Throwable ignored) {}
+    }
 
     public static long create(long parentView, long token, int port, int mode,
                               int flags, long unusedSessionId, Events events) {
@@ -103,6 +126,7 @@ public final class FFMWKWebView {
             MemorySegment dataStore = (MemorySegment) ObjC.sendAddress(0).invoke(
                     ObjC.cls("WKWebsiteDataStore"), ObjC.sel("defaultDataStore"));
             ObjC.callVoid(w.configuration, "setWebsiteDataStore:", dataStore);
+            w.dataStore = dataStore;
             configureProxy(dataStore, effectivePort, effectiveMode);
 
             // Safari-ish user agent + shared process pool (native parity:
@@ -357,7 +381,17 @@ public final class FFMWKWebView {
     private static void configureProxy(MemorySegment dataStore, int port, int mode) {
         if (System.getProperty("rigel.ffm.diag") != null)
             System.out.println("[ffm] configureProxy enter port=" + port + " mode=" + mode);
-        if (port <= 0) return;
+        if (port <= 0) {
+            // Proxy off: reset statics and clear any per-view proxy configs.
+            proxyHost = null;
+            proxyMode = 0;
+            try {
+                MemorySegment empty = (MemorySegment) ObjC.sendAddress(1).invoke(
+                        ObjC.cls("NSArray"), ObjC.sel("array"));
+                ObjC.callVoid(dataStore, "setProxyConfigurations:", empty);
+            } catch (Throwable ignored) {}
+            return;
+        }
         try {
             SymbolLookup net;
             try { net = SymbolLookup.libraryLookup("/usr/lib/libNetwork.dylib", ObjC.GLOBAL); }
@@ -383,7 +417,8 @@ public final class FFMWKWebView {
                     .map(h -> ObjC.LINKER.downcallHandle(h,
                             FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS))).orElse(null);
             if (socksFn == null && httpFn == null) return;
-            MemorySegment endpoint = (MemorySegment) endpointFn.invoke(ObjC.GLOBAL.allocateFrom("127.0.0.1"),
+            String host = (proxyHost == null || proxyHost.isBlank()) ? "127.0.0.1" : proxyHost;
+            MemorySegment endpoint = (MemorySegment) endpointFn.invoke(ObjC.GLOBAL.allocateFrom(host),
                     ObjC.GLOBAL.allocateFrom(String.valueOf(port)));
             MemorySegment proxy = mode == 2 && socksFn != null
                     ? (MemorySegment) socksFn.invoke(endpoint)
@@ -719,6 +754,41 @@ public final class FFMWKWebView {
                     ObjC.staticHandle(FFMWKWebView.class, "processTerminated",
                             MethodType.methodType(void.class, MemorySegment.class, MemorySegment.class, MemorySegment.class)),
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS), "v@:@");
+            ObjC.addMethod(c, "webViewDidClose:",
+                    ObjC.staticHandle(FFMWKWebView.class, "webViewDidClose",
+                            MethodType.methodType(void.class, MemorySegment.class, MemorySegment.class, MemorySegment.class)),
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS), "v@:@");
+            ObjC.addMethod(c, "webView:runJavaScriptAlertPanelWithMessage:initiatedByFrame:completionHandler:",
+                    ObjC.staticHandle(FFMWKWebView.class, "runJavaScriptAlert",
+                            MethodType.methodType(void.class, MemorySegment.class, MemorySegment.class,
+                                    MemorySegment.class, MemorySegment.class, MemorySegment.class,
+                                    MemorySegment.class)),
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS),
+                    "v@:@@@@");
+            ObjC.addMethod(c, "webView:runJavaScriptConfirmPanelWithMessage:initiatedByFrame:completionHandler:",
+                    ObjC.staticHandle(FFMWKWebView.class, "runJavaScriptConfirm",
+                            MethodType.methodType(void.class, MemorySegment.class, MemorySegment.class,
+                                    MemorySegment.class, MemorySegment.class, MemorySegment.class,
+                                    MemorySegment.class)),
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS),
+                    "v@:@@@@");
+            ObjC.addMethod(c, "webView:runJavaScriptTextInputPanelWithPrompt:defaultText:initiatedByFrame:completionHandler:",
+                    ObjC.staticHandle(FFMWKWebView.class, "runJavaScriptTextInput",
+                            MethodType.methodType(void.class, MemorySegment.class, MemorySegment.class,
+                                    MemorySegment.class, MemorySegment.class, MemorySegment.class,
+                                    MemorySegment.class, MemorySegment.class)),
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS),
+                    "v@:@@@@@");
+            ObjC.addMethod(c, "requestMediaCapturePermissionForOrigin:decisionBlock:",
+                    ObjC.staticHandle(FFMWKWebView.class, "requestMediaCapture",
+                            MethodType.methodType(void.class, MemorySegment.class, MemorySegment.class,
+                                    MemorySegment.class, MemorySegment.class)),
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS), "v@:@@");
             ObjC.addMethod(c, "download:decideDestinationUsingResponse:suggestedFilename:completionHandler:",
                     ObjC.staticHandle(FFMWKWebView.class, "downloadDecideDestination",
                             MethodType.methodType(void.class, MemorySegment.class, MemorySegment.class,
@@ -882,7 +952,8 @@ public final class FFMWKWebView {
                                              MemorySegment webView, MemorySegment configuration,
                                              MemorySegment action, MemorySegment features) {
         WebView w = owner(self);
-        if (w != null && w.events != null) {
+        boolean windowed = isWindowedPopup(features);
+        if (w != null && w.events != null && !windowed) {
             String url = "";
             try {
                 MemorySegment req = ObjC.call0(action, "request");
@@ -899,8 +970,23 @@ public final class FFMWKWebView {
                     ObjC.sel("initWithFrame:configuration:"),
                     ObjC.rect(ObjC.GLOBAL, 0, 0, 1, 1), configuration);
             if (popup != null && popup.address() != 0) ObjC.callVoid(popup, "retain");
-            return popup;
+            // Windowed popups (explicit width/height) keep native behavior:
+            // return the view. Otherwise FFM creates a hidden view + opens
+            // the popup as a Rigel tab — same as native when it cannot detect
+            // windowed popups (the NEW_WINDOW event above fires in that case).
+            return windowed ? popup : MemorySegment.NULL;
         } catch (Throwable t) { return MemorySegment.NULL; }
+    }
+
+    private static boolean isWindowedPopup(MemorySegment features) {
+        try {
+            if (features == null || features.address() == 0) return false;
+            for (String sel : new String[]{"width", "height"}) {
+                MemorySegment v = ObjC.call0(features, sel);
+                if (v != null && v.address() != 0 && ObjC.callDouble(v, "doubleValue") > 0) return true;
+            }
+        } catch (Throwable ignored) {}
+        return false;
     }
 
     public static void processTerminated(MemorySegment self, MemorySegment cmd, MemorySegment webView) {
@@ -940,6 +1026,127 @@ public final class FFMWKWebView {
         }
     }
 
+    // ── WKUI dialogs + close parity ──────────────────────────────────────
+
+    /** Mirrors RigelWKWebView.m webViewDidClose: emit CLOSED (type 5) on the
+     *  owning view's event stream; TabManager closes the tab (popup or
+     *  dedicated) via RigelBrowser's native-closed listeners. */
+    public static void webViewDidClose(MemorySegment self, MemorySegment cmd, MemorySegment webView) {
+        WebView w = owner(self);
+        if (w != null && w.events != null && !w.destroyed)
+            w.events.event(w.token, 5, "", ""); // MacWKWebView.CLOSED
+    }
+
+    public static void runJavaScriptAlert(MemorySegment self, MemorySegment cmd, MemorySegment webView,
+                                          MemorySegment message, MemorySegment frame, MemorySegment completion) {
+        try {
+            MemorySegment alert = ObjC.allocInit(ObjC.cls("NSAlert"));
+            ObjC.callVoid(alert, "setMessageText:", ObjC.nsString(safeString(ObjC.javaString(message))));
+            ObjC.callVoidInt(alert, "setAlertStyle:", 2); // NSAlertStyleWarning
+            ObjC.callVoid(alert, "addButtonWithTitle:", ObjC.nsString("OK"));
+            ObjC.callInt(alert, "runModal");
+            invokeBlock(completion);
+        } catch (Throwable t) { System.err.println("[ffm] JS alert failed: " + t); }
+    }
+
+    public static void runJavaScriptConfirm(MemorySegment self, MemorySegment cmd, MemorySegment webView,
+                                            MemorySegment message, MemorySegment frame, MemorySegment completion) {
+        try {
+            MemorySegment alert = ObjC.allocInit(ObjC.cls("NSAlert"));
+            ObjC.callVoid(alert, "setMessageText:", ObjC.nsString(safeString(ObjC.javaString(message))));
+            ObjC.callVoidInt(alert, "setAlertStyle:", 2);
+            ObjC.callVoid(alert, "addButtonWithTitle:", ObjC.nsString("OK"));
+            ObjC.callVoid(alert, "addButtonWithTitle:", ObjC.nsString("Cancel"));
+            int result = ObjC.callInt(alert, "runModal");
+            invokeBlock(completion, result == 1000); // NSAlertFirstButtonReturn
+        } catch (Throwable t) { System.err.println("[ffm] JS confirm failed: " + t); }
+    }
+
+    public static void runJavaScriptTextInput(MemorySegment self, MemorySegment cmd, MemorySegment webView,
+                                              MemorySegment prompt, MemorySegment defaultText,
+                                              MemorySegment frame, MemorySegment completion) {
+        try {
+            MemorySegment alert = ObjC.allocInit(ObjC.cls("NSAlert"));
+            ObjC.callVoid(alert, "setMessageText:", ObjC.nsString(safeString(ObjC.javaString(prompt))));
+            ObjC.callVoidInt(alert, "setAlertStyle:", 2);
+            MemorySegment field = (MemorySegment) ObjC.LINKER.downcallHandle(ObjC.MSG_SEND,
+                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ObjC.CGRect))
+                    .invoke(ObjC.sendAddress(0).invoke(ObjC.cls("NSTextField"), ObjC.sel("alloc")),
+                            ObjC.sel("initWithFrame:"), ObjC.rect(ObjC.GLOBAL, 0, 0, 320, 24));
+            ObjC.callVoid(field, "setStringValue:", ObjC.nsString(safeString(ObjC.javaString(defaultText))));
+            ObjC.callVoid(alert, "setAccessoryView:", field);
+            ObjC.callVoid(alert, "addButtonWithTitle:", ObjC.nsString("OK"));
+            ObjC.callVoid(alert, "addButtonWithTitle:", ObjC.nsString("Cancel"));
+            int result = ObjC.callInt(alert, "runModal");
+            String text = "";
+            if (result == 1000) text = safeString(ObjC.javaString(ObjC.call0(field, "stringValue")));
+            invokeBlock(completion, ObjC.nsString(text));
+        } catch (Throwable t) { System.err.println("[ffm] JS text input failed: " + t); }
+    }
+
+    /** AVCaptureDevice + user decisionBlock. On the WK thread we block in a
+     *  small poll loop waiting for the authorization state to settle; the
+     *  decision is then invoked as Allow(1)/Deny(0)/Timeout(2). */
+    public static void requestMediaCapture(MemorySegment self, MemorySegment cmd,
+                                           MemorySegment origin, MemorySegment decisionBlock) {
+        try {
+            MemorySegment videoType = ObjC.nsString("vide");
+            MemorySegment audioType = ObjC.nsString("soun");
+            long deadline = System.currentTimeMillis() + 5_000;
+            while (ObjC.callInt(ObjC.cls("AVCaptureDevice"), "authorizationStatusForMediaType:", videoType) == 0
+                    && System.currentTimeMillis() < deadline) {
+                Thread.sleep(50);
+            }
+            while (ObjC.callInt(ObjC.cls("AVCaptureDevice"), "authorizationStatusForMediaType:", audioType) == 0
+                    && System.currentTimeMillis() < deadline) {
+                Thread.sleep(50);
+            }
+            int videoStatus = ObjC.callInt(ObjC.cls("AVCaptureDevice"), "authorizationStatusForMediaType:", videoType);
+            int audioStatus = ObjC.callInt(ObjC.cls("AVCaptureDevice"), "authorizationStatusForMediaType:", audioType);
+            // AVAuthorizationStatus: 0 notDetermined, 1 restricted, 2 denied, 3 authorized.
+            boolean videoOk = videoStatus == 3, audioOk = audioStatus == 3;
+            boolean timedOut = videoStatus == 0 || audioStatus == 0;
+            invokeBlock(decisionBlock, videoOk && audioOk ? 1L : timedOut ? 2L : 0L);
+        } catch (Throwable t) { System.err.println("[ffm] media capture request failed: " + t); }
+    }
+
+    private static String safeString(String s) { return s == null ? "" : s; }
+
+    /** Invokes a void*-returning completion block (Objective-C blocks are
+     *  id-typed, so the first descriptor arg is ADDRESS) with optional args.
+     *  Never lets a failure leave a completion uncalled. */
+    private static void invokeBlock(MemorySegment block) {
+        try {
+            ObjC.LINKER.downcallHandle(invokePtr(block),
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)).invoke(block);
+        } catch (Throwable t) { System.err.println("[ffm] block invoke failed: " + t); }
+    }
+
+    private static void invokeBlock(MemorySegment block, boolean value) {
+        try {
+            ObjC.LINKER.downcallHandle(invokePtr(block),
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.JAVA_BOOLEAN)).invoke(block, value);
+        } catch (Throwable t) { System.err.println("[ffm] block invoke failed: " + t); }
+    }
+
+    private static void invokeBlock(MemorySegment block, long value) {
+        try {
+            ObjC.LINKER.downcallHandle(invokePtr(block),
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.JAVA_LONG)).invoke(block, value);
+        } catch (Throwable t) { System.err.println("[ffm] block invoke failed: " + t); }
+    }
+
+    private static void invokeBlock(MemorySegment block, MemorySegment value) {
+        try {
+            ObjC.LINKER.downcallHandle(invokePtr(block),
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS)).invoke(block, value);
+        } catch (Throwable t) { System.err.println("[ffm] block invoke failed: " + t); }
+    }
+
+    private static MemorySegment invokePtr(MemorySegment block) {
+        return block.reinterpret(32).get(ValueLayout.ADDRESS, 16L);
+    }
+
     public static void downloadStarted(long token, MemorySegment block,
                                        MemorySegment download, MemorySegment error) {
         WebView w = HANDLES.values().stream().filter(v -> v.token == token).findFirst().orElse(null);
@@ -970,6 +1177,8 @@ public final class FFMWKWebView {
             MemorySegment progress = ObjC.call0(download, "progress");
             completed = (long) ObjC.callDouble(progress, "completedUnitCount");
             total = (long) ObjC.callDouble(progress, "totalUnitCount");
+            if ("destination".equals(event) && w != null)
+                path = w.destTargets.getOrDefault(id, "");
         } catch (Throwable ignored) {}
         return payload(event, id, name, url, path, String.valueOf(completed),
                 String.valueOf(total), extra);
@@ -1027,15 +1236,50 @@ public final class FFMWKWebView {
             String name = ObjC.javaString(filename);
             if (name == null || name.isBlank()) name = "download";
             String dir = w == null ? System.getProperty("user.home") + "/Downloads" : w.downloadDirectory;
-            java.nio.file.Path target = java.nio.file.Path.of(dir, name);
+            java.nio.file.Path original = java.nio.file.Path.of(dir, name);
+            // Dedupe: append " (N)" before the extension until free.
+            java.nio.file.Path target = original;
+            for (int n = 1; java.nio.file.Files.exists(target) && n <= 1000; n++) {
+                String base = original.toString();
+                int dot = base.lastIndexOf('.');
+                int sep = base.lastIndexOf('/');
+                if (dot > sep && dot > 0) target = java.nio.file.Path.of(base.substring(0, dot) + " (" + n + ")" + base.substring(dot));
+                else target = java.nio.file.Path.of(base + " (" + n + ")");
+            }
             java.nio.file.Files.createDirectories(target.getParent());
-            MemorySegment url = (MemorySegment) ObjC.sendAddress(1).invoke(ObjC.cls("NSURL"),
-                    ObjC.sel("fileURLWithPath:"), ObjC.nsString(target.toString()));
-            MemorySegment invokePtr = completion.reinterpret(32).get(ValueLayout.ADDRESS, 16L);
-            MethodHandle invoke = ObjC.LINKER.downcallHandle(invokePtr,
-                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
-            invoke.invoke(completion, url);
+            if (w != null) w.destTargets.put(id, target.toString());
+            // Ask-before: modal Yes/No alert; on No still complete with nil
+            // (WebKit reports "cancelled" — same as native cancel path).
+            if (w != null && w.askBeforeDownload && !showAskBeforeDownloadDialog(name)) {
+                invokeDestination(completion, null);
+                return;
+            }
+            invokeDestination(completion, target.toString());
         } catch (Throwable ignored) {}
+    }
+
+    private static boolean showAskBeforeDownloadDialog(String fileName) {
+        try {
+            MemorySegment alert = ObjC.allocInit(ObjC.cls("NSAlert"));
+            ObjC.callVoid(alert, "setMessageText:", ObjC.nsString("Download " + safeString(fileName) + "?"));
+            ObjC.callVoid(alert, "addButtonWithTitle:", ObjC.nsString("Yes"));
+            ObjC.callVoid(alert, "addButtonWithTitle:", ObjC.nsString("No"));
+            int result = ObjC.callInt(alert, "runModal");
+            return result == 1000; // NSAlertFirstButtonReturn
+        } catch (Throwable t) {
+            System.err.println("[ffm] ask-before dialog failed: " + t);
+            return true;
+        }
+    }
+
+    private static void invokeDestination(MemorySegment completion, String path) {
+        try {
+            MemorySegment url = path == null
+                    ? MemorySegment.NULL
+                    : (MemorySegment) ObjC.sendAddress(1).invoke(ObjC.cls("NSURL"),
+                            ObjC.sel("fileURLWithPath:"), ObjC.nsString(path));
+            invokeBlock(completion, url);
+        } catch (Throwable t) { System.err.println("[ffm] destination invoke failed: " + t); }
     }
 
     public static void downloadFinished(MemorySegment self, MemorySegment cmd, MemorySegment download) {

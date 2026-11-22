@@ -390,6 +390,7 @@ public class BrowserUI {
             closed.run();
         });
         shell.open();
+        animateShellIn();
         // A command-line Java/SWT launch may show the shell without activating
         // the application. WKWebView then receives native NSEvents in a non-key
         // window but correctly withholds them from the page. Finish the normal
@@ -570,6 +571,7 @@ public class BrowserUI {
     }
 
     private void disposeUiResources() {
+        animateShellOut();
         disposeColors();
         disposeFonts();
     }
@@ -1082,6 +1084,12 @@ public class BrowserUI {
         addressBar.setMessage("Search the web or enter a URL");
         setAccessibleName(addressBar, "Address and search");
         addressBar.addListener(SWT.DefaultSelection, e -> commitAddress());
+        addressBar.addKeyListener(new org.eclipse.swt.events.KeyAdapter() {
+            @Override public void keyPressed(org.eclipse.swt.events.KeyEvent e) {
+                // Alt+Down: recent-history dropdown over the address bar.
+                if (e.keyCode == SWT.ARROW_DOWN && (e.stateMask & SWT.ALT) != 0) showHistoryMenu();
+            }
+        });
         addressBar.addFocusListener(new FocusAdapter() {
             @Override public void focusGained(FocusEvent e) {
                 addressBar.selectAll();
@@ -2177,6 +2185,42 @@ public class BrowserUI {
 
     // ── Callbacks from TabManager ────────────────────────────────────────────
 
+    /** Fade the shell in over ~25 frames (alpha 0→255). */
+    private void animateShellIn() {
+        if (shell == null || shell.isDisposed()) return;
+        try {
+            shell.setAlpha(0);
+            Display display = shell.getDisplay();
+            Runnable[] frame = new Runnable[1];
+            frame[0] = () -> {
+                if (shell.isDisposed()) return;
+                int alpha = Math.min(255, shell.getAlpha() + 10);
+                shell.setAlpha(alpha);
+                if (alpha < 255) display.timerExec(8, frame[0]);
+            };
+            display.timerExec(8, frame[0]);
+        } catch (Throwable ignored) {
+            try { shell.setAlpha(255); } catch (Throwable ignored2) {}
+        }
+    }
+
+    /** Fade the shell out just before it is disposed (shell close). */
+    private void animateShellOut() {
+        if (shell == null || shell.isDisposed()) return;
+        try {
+            shell.setAlpha(255);
+            Display display = shell.getDisplay();
+            Runnable[] frame = new Runnable[1];
+            frame[0] = () -> {
+                if (shell.isDisposed()) return;
+                int alpha = Math.max(0, shell.getAlpha() - 10);
+                shell.setAlpha(alpha);
+                if (alpha > 0) display.timerExec(8, frame[0]);
+            };
+            display.timerExec(8, frame[0]);
+        } catch (Throwable ignored) {}
+    }
+
     private static String displayAddress(String url) {
         if (url == null || url.isBlank() || "rigel://home".equals(url)
                 || "about:blank".equals(url)) return "";
@@ -2366,6 +2410,12 @@ public class BrowserUI {
             settings.setZoomPercent(percent);
             presentStatus(percent == 100 ? "Actual size" : "Zoom " + percent + "%");
         });
+    }
+
+    /** Package view of the shared History used by Alt+Down completion and
+     *  history dropdowns; recent-first copy, never null. */
+    List<config.History.Entry> historyEntries() {
+        return history == null ? List.of() : history.recent();
     }
 
     public void recordHistory(String title, String url) {
@@ -3753,11 +3803,48 @@ public class BrowserUI {
     // ── Address bar ──────────────────────────────────────────────────────────
 
     private void commitAddress() {
-        String url = resolveAddressInput(addressBar.getText());
+        String typed = addressBar == null ? "" : addressBar.getText();
+        // Address-bar completion: if history suggests a strong match for the
+        // typed text, navigate there instead of the raw input.
+        String completed = tabManager.completeAddress(typed);
+        if (completed != null && !completed.isBlank()) typed = completed;
+        String url = resolveAddressInput(typed);
         if (url != null) {
+            addressBar.setText(displayAddress(url));
             tabManager.navigate(url);
             tabManager.focusActiveBrowser();
         }
+    }
+
+    /** Alt+Down on the address bar: dropdown of recent history (≤10), Enter
+     *  on a row navigates. */
+    private void showHistoryMenu() {
+        if (addressBar == null || addressBar.isDisposed()) return;
+        List<config.History.Entry> recent = historyEntries();
+        if (recent.isEmpty()) return;
+        Menu menu = new Menu(addressBar.getShell(), SWT.POP_UP);
+        menu.addListener(SWT.Hide, e -> { if (!menu.isDisposed()) menu.dispose(); });
+        int limit = Math.min(10, recent.size());
+        for (int i = 0; i < limit; i++) {
+            config.History.Entry e = recent.get(i);
+            String url = e.url == null ? "" : e.url;
+            String label = (e.title == null || e.title.isBlank()) ? url : e.title + "  (" + url + ")";
+            MenuItem item = new MenuItem(menu, SWT.NONE);
+            item.setText(label);
+            item.addSelectionListener(new org.eclipse.swt.events.SelectionAdapter() {
+                @Override public void widgetSelected(org.eclipse.swt.events.SelectionEvent se) {
+                    if (addressBar == null || addressBar.isDisposed()) return;
+                    addressBar.setText(displayAddress(url));
+                    String nav = resolveAddressInput(addressBar.getText());
+                    if (nav != null) {
+                        tabManager.navigate(nav);
+                        tabManager.focusActiveBrowser();
+                    }
+                }
+            });
+        }
+        addressBar.setMenu(menu);
+        menu.setVisible(true);
     }
 
     /** Shared by the omnibox and the built-in new-tab page. */

@@ -90,7 +90,10 @@ public final class RigelArrowKeyDiagnostic {
                 (v, e) -> { System.out.println("state: " + v + (e != null ? " err=" + e : "")); preLatch.countDown(); });
             long pd = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
             while (preLatch.getCount() > 0 && System.nanoTime() < pd) pump(display);
-            boolean clean = report.get() != null && report.get().contains("\"value\":\"hello\"");
+            // The 'x' posted above proves synthetic keys reach the web input;
+            // expected caret after 2xLEFT + 1xRIGHT from the end of "hellox": 5.
+            boolean clean = report.get() != null && report.get().contains("\"value\":\"hellox\"")
+                    && report.get().contains("\"selection\":5");
             System.out.println(clean
                     ? "PASS: no illegal characters inserted"
                     : "FAIL: arrow keys corrupted the field contents");

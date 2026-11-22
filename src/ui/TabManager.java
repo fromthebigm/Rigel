@@ -1781,6 +1781,39 @@ public class TabManager {
         ui.onTabsChanged();
     }
 
+    /** Moves the active tab to the given slot (0-based; like dropping it in
+     *  that strip position). Used by the FFM/native closed-tab parity path
+     *  and any programmatic reorder. */
+    public void reorderActiveTab(int targetIndex) {
+        TabData tab = activeTab();
+        if (tab != null) moveTab(tab, targetIndex);
+    }
+
+    /** Address-bar completion: best match from browsing history (most
+     *  recent first, prefix > substring). Returns the full URL to navigate
+     *  to, or null when nothing is a strong match (caller then resolves the
+     *  typed input as before). */
+    public String completeAddress(String typed) {
+        if (typed == null) return null;
+        String t = typed.trim();
+        if (t.isEmpty()) return null;
+        String lowerT = t.toLowerCase(java.util.Locale.ROOT);
+        if ("rigel://home".startsWith(lowerT)) return "rigel://home";
+        String best = null;
+        int bestScore = 0;
+        for (config.History.Entry e : ui.historyEntries()) {
+            String url = e.url == null ? "" : e.url.trim();
+            if (url.isEmpty()) continue;
+            String lowerU = url.toLowerCase(java.util.Locale.ROOT);
+            int score;
+            if (url.startsWith(t) || lowerU.startsWith(lowerT)) score = 100;
+            else if (lowerU.contains(lowerT)) score = 50;
+            else continue;
+            if (score > bestScore) { bestScore = score; best = url; }
+        }
+        return bestScore > 0 ? best : null;
+    }
+
     /**
      * Removes a tab without recording it as "closed", for tear-off into a
      * new window (Chrome-style tab dragging). Disposes this window's copy;
@@ -2175,6 +2208,12 @@ public class TabManager {
 
     private void wireListeners(TabData tab) {
         RigelBrowser b = tab.browser;
+        // webViewDidClose: (FFM/native parity) — close the owning tab even if
+        // it wasn't closed through the UI (e.g. native callback for popups).
+        b.addNativeClosedListener(() -> {
+            int idx = indexOfBrowser(b);
+            if (idx >= 0 && !b.isDisposed()) closeTab(idx);
+        });
 
         b.addLocationListener(new RigelBrowser.LocationListener() {
             @Override

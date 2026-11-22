@@ -187,12 +187,15 @@ final class MacWKWebView extends Composite {
 
     static void setProxy(int proxyPort, int proxyMode) {
         // The first native view applies the stored proxy properties while it
-        // builds its WKWebViewConfiguration. Calling into WKWebsiteDataStore
-        // before any view exists only configures that same singleton twice and
-        // can delay the first window significantly. Existing views still need
-        // the live update when Settings changes at runtime.
-        if (!VIEWS.isEmpty())
-            bridge().rigel_wk_set_proxy(Math.max(0, proxyPort), proxyMode);
+        // builds its WKWebViewConfiguration (statics path — no store calls,
+        // to avoid delaying first window). With live views present, push the
+        // new config onto every view's WKWebsiteDataStore too, so the change
+        // applies to the whole process without a restart.
+        ui.wk.FFMWKWebView.setProxy(Math.max(0, proxyPort), proxyMode);
+    }
+
+    static void setProxyHost(String host) {
+        ui.wk.FFMWKWebView.setProxyHost(host);
     }
 
     static void setAv1NormalizationAllSites(boolean enabled) {
