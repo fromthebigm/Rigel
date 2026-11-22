@@ -141,9 +141,62 @@ static NSString *BridgeScript(void) {
         "})();";
 }
 
+static NSString *GoogleTapScript(void) {
+    return @"(function(){
+  try{
+    var hn=location.hostname.toLowerCase();
+    if(hn.indexOf('music.google.com')<0&&hn.indexOf('music.apple.com')<0)return;
+    var h=window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.rigelDiagnostics;
+    var tap=window.__rigelGoogleMusicTap;if(tap)return;
+    tap={tries:0,clicked:0,started:performance.now()};
+    window.__rigelGoogleMusicTap=tap;
+    function send(e){try{e.via=location.hostname;e.t=Math.round(performance.now());h&&h.postMessage(JSON.stringify(e));}catch(x){}}
+    function str(v){try{return String(v==null?'':v)}catch(x){return ''}}
+    function enc(v){try{return str(v).slice(0,120)}catch(x){return ''}}
+    function cookies(){var o=[];try{str(document.cookie).split(';').forEach(function(p){var i=p.indexOf('=');if(i>0)o.push(enc(p.substr(0,i)))})}catch(x){}return o}
+    function state(){
+      var o={};
+      try{
+        o.webkitHandlers=!!window.webkit&&!!window.webkit.messageHandlers;
+        o.execCommand=typeof document.execCommand==='function';
+        o.googleApi=!!window.google;
+        o.gsiApi=!!(window.google&&window.google.accounts&&(window.google.accounts.id||window.google.accounts.oauth2));
+        o.gsiElements=document.querySelectorAll('[data-one-tap],iframe[id*=gsi i],iframe[class*=gsi i],div[class*=gsi i]').length;
+        o.gsiIframes=Array.prototype.filter.call(document.querySelectorAll('iframe'),function(f){var u=str(f.src||'');return u.indexOf('accounts.google.com')>=0||u.indexOf('gsi')>=0}).length;
+        o.emailInputs=document.querySelectorAll('input[type=email],input[autocomplete=username],input[name*=email i],input[placeholder*=email i]').length;
+        o.credentialCookies=cookies().filter(function(n){return n.indexOf('SID')>=0||n.indexOf('SOCS')>=0||n.indexOf('GMAIL_SID')>=0}).length;
+        o.sidCookiePresent=o.credentialCookies>0;
+      }catch(e){o.error=str(e)}
+      return o;
+    }
+    function clickIt(el,via){
+      try{el.click();send({event:'tap-clicked',via:via,tag:el.tagName,id:enc(el.id),text:enc((el.textContent||'').trim()).slice(0,80),cls:enc(String(el.className).slice(0,60))});tap.clicked++;return true}catch(e){send({event:'tap-click-failed',via:via,error:str(e)});return false}
+    }
+    function tryClick(){
+      var tried=false;
+      var btns=Array.prototype.slice.call(document.querySelectorAll('[data-one-tap] button,[data-one-tap],[gsi-bubble] button,.gsi-bubble-button,button[aria-label*=Continue as],button[aria-label*=Turn on],button[aria-label*=Turn on next],button[data-credential-ui-selector]'),0);
+      btns.slice(0,3).forEach(function(b){if(!tried&&clickIt(b,'top-level'))tried=true});
+      var f=document.querySelector('iframe[id*=gsi i],iframe[class*=gsi i]');
+      if(f&&!tried){try{var d=f.contentDocument;if(d){Array.prototype.forEach.call(d.querySelectorAll('button,a,[role=button]'),function(b){if(!tried&&clickIt(b,'gsi-iframe'))tried=true})}}catch(e){send({event:'tap-iframe-failed',error:str(e)})}}
+      send({event:'tap-check',state:state(),clicked:tried});
+    }
+    send({event:'tap-start',state:state(),autotest:!!window.__rigelGoogleMusicAutotest});
+    setInterval(function(){
+      try{
+        var st=state();
+        var hot=st.gsiElements>0||st.gsiIframes>0||st.credentialCookies>0||st.emailInputs>0||window.__rigelGoogleMusicAutotest===true;
+        if(hot&&!tap.done){tap.done=true;send({event:'tap-active',state:st,autotest:!!window.__rigelGoogleMusicAutotest});tryClick();}
+        else if(!hot){send({event:'tap-idle',state:st});}
+      }catch(e){send({event:'tap-error',error:str(e)});}
+    },1000);
+  }catch(e){send({event:'tap-fatal',error:str(e)})}
+})();";
+    return [apple stringByAppendingString:GoogleTapScript()];
+}
+
 static NSString *LoginDiagnosticsScript(void) {
-    return @"(function(){"
-        "if(window.__rigelLoginDiagnostics||!/(^|\\.)music\\.apple\\.com$/i.test(location.hostname))return;"
+    NSString *apple = @"(function(){"
+        "if(window.__rigelLoginDiagnostics||!/(^|\\.)(music\\.apple\\.com|music\\.google\\.com)$/i.test(location.hostname))return;"
         "window.__rigelLoginDiagnostics=1;"
         "var tries=0,clicked=false,h=window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.rigelDiagnostics,T=false;try{T=top===window}catch(e){T=true}"
         "function send(v){try{h&&h.postMessage(JSON.stringify(v))}catch(e){}}"
@@ -1536,7 +1589,8 @@ static NSString *RigelOriginLabel(WKSecurityOrigin *origin, WKFrameInfo *frame, 
 
 static NSArray<NSString *> *HandlerNames(void) {
     return @[@"javaEnterFullscreen", @"javaExitFullscreen", @"rigelHomeNavigate",
-             @"rigelClipboardWrite", @"rigelDownload", @"rigelEvent", @"rigelDiagnostics"];
+             @"rigelClipboardWrite", @"rigelDownload", @"rigelEvent", @"rigelDiagnostics",
+             @"rigelContext", @"rigelOpen"];
 }
 
 static void InstallUserScripts(WKUserContentController *controller, BOOL normalizeAv1AllSites) {
@@ -1564,6 +1618,8 @@ static void InstallUserScripts(WKUserContentController *controller, BOOL normali
         NSString *source = LoginDiagnosticsScript();
         if (getenv("RIGEL_LOGIN_AUTOTEST") != NULL)
             source = [@"window.__rigelLoginAutotest=true;" stringByAppendingString:source];
+        if (getenv("RIGEL_GOOGLE_MUSIC_AUTOTEST") != NULL)
+            source = [@"window.__rigelGoogleMusicAutotest=true;" stringByAppendingString:source];
         WKUserScript *loginDiagnostics = [[WKUserScript alloc]
             initWithSource:source
             injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];

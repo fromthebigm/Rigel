@@ -11,6 +11,7 @@ mkdir -p "$OUT/classes"
   -d "$OUT/classes" \
   "$ROOT/src/config/AtomicFiles.java" \
   "$ROOT/src/config/Settings.java" \
+  "$ROOT/src/config/SearchEngines.java" \
   "$ROOT/src/config/Bookmarks.java" \
   "$ROOT/src/config/History.java" \
   "$ROOT/tests/java/config/RigelConfigHardeningTest.java"

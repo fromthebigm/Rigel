@@ -65,9 +65,16 @@ public final class SearchEngines {
         /** Home-page shortcut label for the new-tab page ("" = none). */
         public String homeShortcut() { return homeShortcut == null ? "" : homeShortcut; }
 
-        /** Search URL for {@code query}: substitutes {query}/{q}/{?} or appends. */
+        /** Search URL for {@code query}: substitutes a {query}/{q} placeholder,
+         *  else appends {@code ?param=encoded} (or {@code &param=...} when the
+         *  base already carries a query string). */
         public String searchUrl(String rawQuery) {
-            return replaceQuery(template, encode(rawQuery));
+            String q = encode(rawQuery);
+            String t = template.trim();
+            if (t.contains("%s")) return t.replace("%s", q);
+            if (t.contains("{q}")) return t.replace("{q}", q);
+            String sep = t.indexOf('?') >= 0 ? (t.endsWith("?") ? "" : "&") : "?";
+            return t + sep + queryParameter() + "=" + q;
         }
 
         @Override public String toString() { return name + " (" + id + ")"; }
@@ -108,14 +115,27 @@ public final class SearchEngines {
         return GOOGLE_ENGINE;
     }
 
-    /** The configured engine for Settings — uses {@link Settings#getSearchEngineId()}. */
+    /** The configured engine for Settings — uses {@link Settings#getSearchEngineId()}.
+     *  A selected "custom" engine builds its {@link Engine} from the persisted
+     *  {@code search.engine.custom.*} fields. */
     public static Engine currentEngine(Settings settings) {
+        if (settings != null && CUSTOM.equals(settings.getSearchEngineId())) {
+            String base = settings.getCustomEngineUrl();
+            if (base != null && !base.trim().isEmpty()) {
+                String name = settings.getCustomEngineName();
+                if (name == null || name.isBlank()) name = base.trim();
+                return new Engine(CUSTOM, name, base.trim(),
+                        settings.getCustomEngineQueryParameter(), true, true,
+                        settings.getEngineHomeShortcut());
+            }
+        }
         return find(settings == null ? null : settings.getSearchEngineId());
     }
 
     /** The configured engine, or Google as the final default. */
     public static Engine currentEngineOrGoogle(Settings settings) {
-        return currentEngine(settings);
+        Engine e = currentEngine(settings);
+        return e == null ? GOOGLE_ENGINE : e;
     }
 
     /** Static search URL for {@code engine} and {@code query}. */
@@ -149,9 +169,9 @@ public final class SearchEngines {
         if (at >= 0) return t.substring(0, at) + encodedQuery + t.substring(at + 2);
         at = t.indexOf("{q}");
         if (at >= 0) return t.substring(0, at) + encodedQuery + t.substring(at + 3);
-        if (t.endsWith("?")) return t + encodedQuery;
-        if (t.indexOf('?') < 0) return t + "?q=" + encodedQuery;
-        return t;
+        if (t.endsWith("?")) return t + "q=" + encodedQuery;
+        if (t.indexOf('?') >= 0) return t + "&q=" + encodedQuery;
+        return t + "?q=" + encodedQuery;
     }
 
     /** Strips the query part from a URL template — used when showing the

@@ -233,13 +233,14 @@ public class Settings {
     /** Persists the default search engine id. Clears the custom fields when
      *  switching away from "custom". */
     public void setSearchEngineId(String id) {
-        String v = id == null ? "" : id.trim().toLowerCase(java.util.Locale.ROOT);
-        boolean known = SearchEngines.CUSTOM.equals(v) || SearchEngines.namedEngines().stream()
-                .anyMatch(e -> e.id.equals(v));
-        String fid = (!known || v.isEmpty()) ? SearchEngines.GOOGLE : v;
+        String v0raw = id == null ? "" : id.trim().toLowerCase(java.util.Locale.ROOT);
+        String v0 = "duckduckgo".equals(v0raw) ? SearchEngines.ID_DDG : v0raw;  // legacy id
+        boolean known = SearchEngines.CUSTOM.equals(v0) || SearchEngines.namedEngines().stream()
+                .anyMatch(e -> e.id.equals(v0));
+        String v = (!known || v0.isEmpty()) ? SearchEngines.GOOGLE : v0;
         runBatch(() -> {
-            props.setProperty(K_SEARCH_ENGINE, fid);
-            if (!SearchEngines.CUSTOM.equals(fid)) {
+            props.setProperty(K_SEARCH_ENGINE, v);
+            if (!SearchEngines.CUSTOM.equals(v)) {
                 props.remove(K_SEARCH_ENGINE_CUSTOM_URL);
                 props.remove(K_SEARCH_ENGINE_CUSTOM_QUERY);
                 props.remove(K_SEARCH_ENGINE_CUSTOM_NAME);
