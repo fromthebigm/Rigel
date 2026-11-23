@@ -119,11 +119,11 @@ public class ProxyServer {
             System.out.println("[Rigel] Browser SOCKS5 proxy running on 127.0.0.1:"
                     + browserProxy.getLocalPort());
         } catch (Throwable failure) {
+            // SOCKS ingress is a convenience; losing it must not kill the HTTP
+            // proxy or the whole app. Log loudly and keep serving on localPort.
             browserProxy.close();
-            HttpProxyServer running = server;
-            server = null;
-            if (running != null) running.stop();
-            throw new IllegalStateException("Could not start the Rigel browser proxy", failure);
+            System.err.println("[Rigel] Browser SOCKS5 proxy failed to start (HTTP proxy still up on "
+                    + localPort + "): " + failure);
         }
     }
 

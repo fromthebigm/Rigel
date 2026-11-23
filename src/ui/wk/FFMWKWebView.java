@@ -1105,8 +1105,14 @@ public final class FFMWKWebView {
             int audioStatus = ObjC.callInt(ObjC.cls("AVCaptureDevice"), "authorizationStatusForMediaType:", audioType);
             // AVAuthorizationStatus: 0 notDetermined, 1 restricted, 2 denied, 3 authorized.
             boolean videoOk = videoStatus == 3, audioOk = audioStatus == 3;
-            boolean timedOut = videoStatus == 0 || audioStatus == 0;
-            invokeBlock(decisionBlock, videoOk && audioOk ? 1L : timedOut ? 2L : 0L);
+            boolean videoDenied = videoStatus == 1 || videoStatus == 2;
+            boolean audioDenied = audioStatus == 1 || audioStatus == 2;
+            // Do not require BOTH camera and mic: a camera-only page used to be
+            // denied because mic stayed notDetermined. Allow if the requested
+            // capability is authorized (or macOS will still prompt at capture
+            // time); deny only when everything relevant is denied/restricted.
+            long decision = (videoOk || audioOk) ? 1L : (videoDenied && audioDenied) ? 0L : 1L;
+            invokeBlock(decisionBlock, decision);
         } catch (Throwable t) { System.err.println("[ffm] media capture request failed: " + t); }
     }
 

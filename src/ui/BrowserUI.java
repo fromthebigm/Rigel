@@ -3965,6 +3965,22 @@ public class BrowserUI {
             return;
         }
 
+        // Plain Backspace must edit text, not navigate back, whenever a text
+        // control owns the keyboard. Only when nothing editable is focused
+        // should Backspace act as "back".
+        if (e.keyCode == SWT.BS || e.character == '\b') {
+            org.eclipse.swt.widgets.Control focus = shell.getDisplay().getFocusControl();
+            boolean textFocus = focus instanceof org.eclipse.swt.widgets.Text
+                    || focus instanceof org.eclipse.swt.widgets.Combo
+                    || focus instanceof org.eclipse.swt.custom.StyledText
+                    || (addressBar != null && !addressBar.isDisposed() && addressBar.isFocusControl())
+                    || (findField != null && !findField.isDisposed() && findField.isFocusControl());
+            if (textFocus) return; // let the widget handle deletion
+            tabManager.back();
+            e.doit = false;
+            return;
+        }
+
         if (ctrl && !cmd && !alt && e.keyCode == SWT.TAB) {
             tabManager.cycleTabs(shift ? -1 : 1);
             e.doit = false;

@@ -100,18 +100,16 @@ case "$APP_ID" in
 esac
 echo "OK: asset basename matches pattern"
 
-# 6. OUR dylibs must be (ad-hoc) signed — the JDK tree is Azul Developer-ID
-# signed and out of scope (never modify jdk/; its signature validates only
-# against the pristine bundle layout, not a zipped subset).
-dylibs=("$ROOT"/**/classes/native/*.dylib(N) "$ROOT"/**/*.dylib(N))
-for d in "${dylibs[@]}"; do
+# 6. No custom native binaries may ship outside the signed JDK tree.
+#    The JDK/SWT binaries inside jdk/ are Azul-signed and out of scope; a
+#    copied subset would invalidate that signature, so never modify jdk/.
+custom_native=("$ROOT"/**/*.dylib(N) "$ROOT"/**/*.jnilib(N) "$ROOT"/**/*.so(N))
+for d in "${custom_native[@]}"; do
     [[ "$d" == */jdk/Contents/* ]] && continue
-    if ! codesign -v "$d" 2>/dev/null; then
-        echo "FAIL: unsigned dylib: $d"
-        exit 1
-    fi
+    echo "FAIL: custom native binary in release payload: $d"
+    exit 1
 done
-echo "OK: all app dylibs signed (jdk tree is Developer-ID signed upstream)"
+echo "OK: no custom native binaries outside the signed JDK"
 
 # 7. No .dSYM bundles
 dsym_count=$(find "$ROOT" -name "*.dSYM" | wc -l | tr -d ' ')

@@ -15,14 +15,21 @@ public class RigelApp {
     }
 
     public static void main(String[] args) {
+        // One bad worker/channel must never take the whole browser down with
+        // it. Log and keep the UI/proxy alive; per-connection isolation is in
+        // the proxy handlers themselves.
+        Thread.setDefaultUncaughtExceptionHandler((t, ex) -> {
+            System.err.println("[Rigel] uncaught on " + t.getName() + ": " + ex);
+            ex.printStackTrace();
+        });
         for (int i = 0; i < args.length - 1; i++) {
             if ("--shot".equals(args[i])) System.setProperty("rigel.shot.path", args[i + 1]);
         }
         // No identity dylib: Java/SWT identity settings carry the presentation
         // name, and the Dock icon comes from config.DockIcon (custom or bundled).
-        System.setProperty("apple.awt.application.name", "Google Chrome");
-        Display.setAppName("Google Chrome");
-        Display.setAppVersion("1.0");
+        System.setProperty("apple.awt.application.name", "Rigel");
+        Display.setAppName("Rigel");
+        Display.setAppVersion("portable");
         // Apply the Dock icon and regular activation policy before AWT/Display
         // initializes AppKit — Apple docs say late changes leave the generic
         // executable tile on some unbundled Java processes.

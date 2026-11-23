@@ -63,18 +63,39 @@ public final class CookieBridge {
             MethodHandle objectAt = ObjC.LINKER.downcallHandle(ObjC.MSG_SEND,
                     FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
+            long ok = 0, skipped = 0;
             for (long i = 0; i < count; i++) {
-                MemorySegment cookie = (MemorySegment) objectAt.invoke(
-                        cookies, ObjC.sel("objectAtIndex:"), i);
-                MemorySegment props = (MemorySegment) ObjC.sendAddress(0).invoke(cookie, ObjC.sel("properties"));
-                if (props != null && props.address() != 0)
-                    ObjC.callVoid(entries, "addObject:", props);
+                try {
+                    MemorySegment cookie = (MemorySegment) objectAt.invoke(
+                            cookies, ObjC.sel("objectAtIndex:"), i);
+                    if (cookie == null || cookie.address() == 0) { skipped++; continue; }
+                    MemorySegment props = (MemorySegment) ObjC.sendAddress(0).invoke(cookie, ObjC.sel("properties"));
+                    if (props != null && props.address() != 0) {
+                        ObjC.callVoid(entries, "addObject:", props);
+                        ok++;
+                    } else {
+                        skipped++;
+                        if (System.getProperty("rigel.ffm.diag") != null)
+                            System.out.println("[ffm] cookie save: skipped malformed cookie at " + i);
+                    }
+                } catch (Throwable one) {
+                    // One poisoned cookie must not abort the whole snapshot.
+                    skipped++;
+                    if (System.getProperty("rigel.ffm.diag") != null)
+                        System.out.println("[ffm] cookie save: skipped failed cookie at " + i + ": " + one);
+                }
             }
             MethodHandle write = ObjC.LINKER.downcallHandle(ObjC.MSG_SEND,
                     FunctionDescriptor.of(ValueLayout.JAVA_BOOLEAN, ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_BOOLEAN));
-            saveOk = (boolean) write.invoke(entries, ObjC.sel("writeToFile:atomically:"),
-                    ObjC.nsString(path), true) ? 1 : 0;
+            boolean wrote = (boolean) write.invoke(entries, ObjC.sel("writeToFile:atomically:"),
+                    ObjC.nsString(path), true);
+            saveOk = wrote ? 1 : 0;
+            try {
+                java.nio.file.Files.writeString(java.nio.file.Path.of(path + ".manifest.json"),
+                        "{\"count\":" + count + ",\"ok\":" + ok + ",\"skipped\":" + skipped
+                                + ",\"wrote\":" + wrote + "}\n");
+            } catch (Throwable ignored) {}
         } catch (Throwable t) {
             if (System.getProperty("rigel.ffm.diag") != null) t.printStackTrace();
             saveOk = 0;
@@ -136,25 +157,40 @@ public final class CookieBridge {
             MemorySegment completion = makeBlock(blockImp);
 
             remaining = (int) count;
+            java.util.concurrent.atomic.AtomicInteger ok = new java.util.concurrent.atomic.AtomicInteger();
             MethodHandle objectAt = ObjC.LINKER.downcallHandle(ObjC.MSG_SEND,
                     FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
             for (long i = 0; i < count; i++) {
-                MemorySegment props = (MemorySegment) objectAt.invoke(
-                        entries, ObjC.sel("objectAtIndex:"), i);
-                MemorySegment cookie = (MemorySegment) ObjC.sendAddress(1).invoke(
-                        ObjC.cls("NSHTTPCookie"), ObjC.sel("cookieWithProperties:"), props);
-                if (cookie == null || cookie.address() == 0) {
-                    if (System.getProperty("rigel.ffm.diag") != null)
-                        System.out.println("[ffm] cookie restore: cookieWithProperties failed at " + i);
+                try {
+                    MemorySegment props = (MemorySegment) objectAt.invoke(
+                            entries, ObjC.sel("objectAtIndex:"), i);
+                    MemorySegment cookie = (MemorySegment) ObjC.sendAddress(1).invoke(
+                            ObjC.cls("NSHTTPCookie"), ObjC.sel("cookieWithProperties:"), props);
+                    if (cookie == null || cookie.address() == 0) {
+                        if (System.getProperty("rigel.ffm.diag") != null)
+                            System.out.println("[ffm] cookie restore: cookieWithProperties failed at " + i);
+                        remaining--;
+                        continue;
+                    }
+                    final long idx = i;
+                    MemorySegment doneBlock = makeBlock(ObjC.LINKER.upcallStub(
+                            ObjC.staticHandle(CookieBridge.class, "restoreDone",
+                                    MethodType.methodType(void.class, MemorySegment.class, MemorySegment.class)),
+                            FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS), ObjC.GLOBAL));
+                    ObjC.callVoid(store, "setCookie:completionHandler:", cookie, doneBlock);
+                    ok.incrementAndGet();
+                } catch (Throwable one) {
                     remaining--;
-                    continue;
+                    if (System.getProperty("rigel.ffm.diag") != null)
+                        System.out.println("[ffm] cookie restore: failed at " + i + ": " + one);
                 }
-                ObjC.callVoid(store, "setCookie:completionHandler:", cookie, completion);
             }
             long deadline = System.nanoTime() + 10_000_000_000L;
             while (remaining > 0 && System.nanoTime() < deadline) pump(0.05);
-            return (int) count;
+            if (System.getProperty("rigel.ffm.diag") != null)
+                System.out.println("[ffm] cookie restore applied=" + ok.get() + "/" + count);
+            return ok.get();
         } catch (Throwable t) {
             if (System.getProperty("rigel.ffm.diag") != null) {
                 System.out.println("[ffm] cookie restore failed: " + t);
@@ -165,6 +201,10 @@ public final class CookieBridge {
     }
 
     public static void setDone(MemorySegment block) {
+        remaining--;
+    }
+
+    public static void restoreDone(MemorySegment self, MemorySegment block) {
         remaining--;
     }
 
