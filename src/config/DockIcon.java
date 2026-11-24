@@ -25,6 +25,8 @@ public final class DockIcon {
 
     private DockIcon() {}
 
+    private static boolean policySet = false;
+
     public static void apply() {
         Path file = resolveIconFile();
         if (file == null || !Files.isRegularFile(file)) return;
@@ -37,10 +39,23 @@ public final class DockIcon {
                             ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             MemorySegment image = (MemorySegment) init.invoke(alloc,
                     ObjC.sel("initWithContentsOfFile:"), ObjC.nsString(file.toString()));
-            if (image != null && image.address() != 0)
+            if (image != null && image.address() != 0
+                    && ObjC.callBool(app, "respondsToSelector:", ObjC.sel("setApplicationIconImage:")))
                 SET_ICON.invoke(app, ObjC.sel("setApplicationIconImage:"), image);
-            ObjC.callVoidInt(app, "setActivationPolicy:", 2); // regular
-            ObjC.callVoidBool(app, "activateIgnoringOtherApps:", true);
+            ensureRegularPolicyOnce(app);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** Activation policy is set once, guarded; never call
+     *  activateIgnoringOtherApps: from an icon setter — it can raise an ObjC
+     *  exception in a bare java process and abort outside Java catch. */
+    private static void ensureRegularPolicyOnce(MemorySegment app) {
+        if (policySet) return;
+        policySet = true;
+        try {
+            if (ObjC.callBool(app, "respondsToSelector:", ObjC.sel("setActivationPolicy:")))
+                ObjC.callVoidInt(app, "setActivationPolicy:", 2); // regular
         } catch (Throwable ignored) {
         }
     }

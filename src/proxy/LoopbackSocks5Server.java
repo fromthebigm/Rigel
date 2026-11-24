@@ -297,7 +297,9 @@ public final class LoopbackSocks5Server implements AutoCloseable {
             clientRelay.setReuseAddress(true);
             clientRelay.bind(new InetSocketAddress(LOOPBACK_V4, 0));
             clientRelay.setSoTimeout(UDP_POLL_TIMEOUT_MS);
-            networkRelay.bind(new InetSocketAddress(0));
+            // Security invariant: every relay socket must be loopback-only.
+            // Binding to the wildcard address would expose the SOCKS UDP relay.
+            networkRelay.bind(new InetSocketAddress(LOOPBACK_V4, 0));
             networkRelay.setSoTimeout(UDP_POLL_TIMEOUT_MS);
             udpRelays.add(clientRelay);
             udpRelays.add(networkRelay);
