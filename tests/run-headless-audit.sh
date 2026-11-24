@@ -21,8 +21,11 @@ if grep -RIn --exclude-dir=build --exclude-dir=classes --exclude-dir=target --ex
   echo "FAIL: unexpected native load" >&2
   exit 1
 fi
-if grep -RIn --exclude-dir=build --exclude-dir=classes --exclude-dir=target --exclude-dir=portable-data --exclude-dir=.git 'Google Chrome' src run.sh run-rigel.sh Rigel.app 2>/dev/null; then
-  echo "FAIL: Rigel identity still contains 'Google Chrome'" >&2
+# Identity must be Google Chrome for the menu bar/Dock name, and the launcher
+# must run through java — no Rigel.app executable bundle.
+grep -q 'Google Chrome' src/RigelApp.java || { echo "FAIL: Rigel identity is not Google Chrome" >&2; exit 1; }
+if [ -e Rigel.app ]; then
+  echo "FAIL: Rigel.app exists — launcher must not have its own executable" >&2
   exit 1
 fi
 

@@ -27,9 +27,9 @@ public class RigelApp {
         }
         // No identity dylib: Java/SWT identity settings carry the presentation
         // name, and the Dock icon comes from config.DockIcon (custom or bundled).
-        System.setProperty("apple.awt.application.name", "Rigel");
-        Display.setAppName("Rigel");
-        Display.setAppVersion("portable");
+        System.setProperty("apple.awt.application.name", "Google Chrome");
+        Display.setAppName("Google Chrome");
+        Display.setAppVersion("1.0");
         // Apply the Dock icon and regular activation policy before AWT/Display
         // initializes AppKit — Apple docs say late changes leave the generic
         // executable tile on some unbundled Java processes.
