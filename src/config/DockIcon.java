@@ -50,8 +50,36 @@ public final class DockIcon {
         apply();
     }
 
+    /** BigM passes a per-app icon down as env when it launches this browser:
+     *  BIGM_PRESENTATION_ICON_{LIGHT,DARK,MODE}. Those win over the local
+     *  setting and the bundled Weather default, so each launcher keeps its
+     *  own icon instead of being forced onto BigM's icon. */
+    private static Path envIcon() {
+        String light = System.getenv("BIGM_PRESENTATION_ICON_LIGHT");
+        String dark = System.getenv("BIGM_PRESENTATION_ICON_DARK");
+        String mode = System.getenv("BIGM_PRESENTATION_ICON_MODE");
+        if (light == null || dark == null) return null;
+        boolean useDark = "dark".equalsIgnoreCase(mode) || ("system".equalsIgnoreCase(mode) && systemDark());
+        Path p = Path.of(useDark ? dark : light);
+        return Files.isRegularFile(p) ? p : null;
+    }
+
+    private static boolean systemDark() {
+        try {
+            Process p = new ProcessBuilder("/usr/bin/defaults", "read", "-g", "AppleInterfaceStyle")
+                    .redirectErrorStream(true).start();
+            String out = new String(p.getInputStream().readAllBytes()).trim();
+            p.waitFor();
+            return out.toLowerCase().contains("dark");
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     private static Path resolveIconFile() {
         try {
+            Path fromBigM = envIcon();
+            if (fromBigM != null) return fromBigM;
             String custom = new Settings().getDockIconPath();
             if (custom != null && !custom.isBlank()) {
                 Path p = Path.of(custom);
