@@ -35,6 +35,10 @@ public class RigelApp {
         // executable tile on some unbundled Java processes.
         config.DockIcon.apply();
         Display display = new Display();
+        // Re-apply after the AppKit/SWT run loop is up; early calls can be
+        // ignored by the Dock tile on unbundled java processes.
+        display.asyncExec(config.DockIcon::apply);
+        display.timerExec(400, config.DockIcon::apply);
         try {
             new BrowserApplication(display).run(pickUrlArg(args));
         } finally {
