@@ -26,7 +26,7 @@ never change menu-bar/Dock names away from Google Chrome.
   contain user data.
 - Release zips are **runtime-only**. Keep: `run.sh`, `run-rigel.sh`, `jdk/`, `lib/`,
   `target/`, `classes/`, `resources/`, `Support/` (empty), `*.icns`, `*.dylib`,
-  preset PNGs, `Weather.app/`. Exclude: `src/`, `Rigel.app/` (no app-bundle executable — Rigel runs through java only),
+  preset PNGs. Exclude: `src/`, `Rigel.app/`, `Weather.app/` (no app-bundle executables — Rigel runs through java only; Dock identity is `*.icns` + FFM),
   `native/`, `tests/`, `build.sh`, `test-rigel.sh`, `aitest.sh`, `*.md`, `.git/`,
   `.gitignore`, `macos_presentation_identity.h` (source header — it's compiled INTO
   `dock_identity.dylib`; nothing reads it at runtime; dropped from zips 2026-09-27),
