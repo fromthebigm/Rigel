@@ -36,6 +36,15 @@ public final class RigelBrowser extends Composite {
     private static final java.util.concurrent.atomic.AtomicBoolean BACKEND_REPORTED =
             new java.util.concurrent.atomic.AtomicBoolean();
 
+    private static final String KEY_EDIT_SAFETY_JS =
+            "document.addEventListener('keydown',function(e){"
+            + "if(e.key!=='Backspace'&&e.key!=='Delete')return;"
+            + "var a=document.activeElement;"
+            + "var ed=!!a&&(a.isContentEditable||a.tagName==='INPUT'||a.tagName==='TEXTAREA'"
+            + "||a.tagName==='SELECT'||a.getAttribute('contenteditable')==='true');"
+            + "if(!ed){e.preventDefault();e.stopPropagation();}"
+            + "},true);";
+
     public enum EditAction {
         // Indices match FFMWKWebView.editAction selector table:
         // 0 undo:, 1 redo:, 2 cut:, 3 copy:, 4 paste:, 5 selectAll:, 6 delete:
@@ -112,6 +121,12 @@ public final class RigelBrowser extends Composite {
                 });
                 backend = Backend.WKWEBVIEW;
                 reportBackend("WKWebView");
+                // WebKit can still give Backspace/Delete a default "go back /
+                // close" meaning when the page focus is not an editable field.
+                // Kill that default only for non-editable focus so Delete on a
+                // normal page (e.g. Poople's delete button) never exits the
+                // tab, while text fields/contenteditable still delete normally.
+                addDocumentStartScript(KEY_EDIT_SAFETY_JS);
                 return;
             } catch (Throwable failure) {
                 throw new IllegalStateException(
