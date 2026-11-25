@@ -2480,6 +2480,8 @@ public class BrowserUI {
         addMenuItem(edit, "Paste", SWT.MOD1 | 'V', () -> performEditAction(RigelBrowser.EditAction.PASTE));
         addMenuItem(edit, "Select All", SWT.MOD1 | 'A', () -> performEditAction(RigelBrowser.EditAction.SELECT_ALL));
         new MenuItem(edit, SWT.SEPARATOR);
+        addMenuItem(edit, "Undo", SWT.MOD1 | 'Z', () -> performEditAction(RigelBrowser.EditAction.UNDO));
+        addMenuItem(edit, "Redo", SWT.MOD1 | SWT.SHIFT | 'Z', () -> performEditAction(RigelBrowser.EditAction.REDO));
         addMenuItem(edit, "Copy Page URL", SWT.MOD1 | SWT.SHIFT | 'C', () -> copyToClipboard(currentUrl()));
         addMenuItem(edit, "Find...", SWT.MOD1 | 'F', this::showFindBar);
         addMenuItem(edit, "Find Next", SWT.MOD1 | 'G', () -> {
@@ -3965,19 +3967,11 @@ public class BrowserUI {
             return;
         }
 
-        // Plain Backspace must edit text, not navigate back, whenever a text
-        // control owns the keyboard. Only when nothing editable is focused
-        // should Backspace act as "back".
+        // Backspace/Delete must NEVER navigate back (modern browser behavior;
+        // it caused the "delete goes to previous page" bug). Let SWT text
+        // widgets and the WKWebView handle deletion themselves. Back is
+        // Cmd+[ / Alt+Left, forward is Cmd+] / Alt+Right.
         if (e.keyCode == SWT.BS || e.character == '\b') {
-            org.eclipse.swt.widgets.Control focus = shell.getDisplay().getFocusControl();
-            boolean textFocus = focus instanceof org.eclipse.swt.widgets.Text
-                    || focus instanceof org.eclipse.swt.widgets.Combo
-                    || focus instanceof org.eclipse.swt.custom.StyledText
-                    || (addressBar != null && !addressBar.isDisposed() && addressBar.isFocusControl())
-                    || (findField != null && !findField.isDisposed() && findField.isFocusControl());
-            if (textFocus) return; // let the widget handle deletion
-            tabManager.back();
-            e.doit = false;
             return;
         }
 

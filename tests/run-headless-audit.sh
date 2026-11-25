@@ -21,6 +21,19 @@ if grep -RIn --exclude-dir=build --exclude-dir=classes --exclude-dir=target --ex
   echo "FAIL: unexpected native load" >&2
   exit 1
 fi
+# Backspace/Delete must never navigate back (regression: delete went to the
+# previous page). The BS handler block must not call tabManager.back().
+if sed -n '/e.keyCode == SWT.BS/,/^        }/p' src/ui/BrowserUI.java | grep -q 'tabManager\.back'; then
+  echo "FAIL: Backspace still navigates back" >&2
+  exit 1
+fi
+# Edit hotkeys must not send unguarded NSResponder selectors to WKWebView from a
+# bare java process (ObjC NSException aborts the JVM; Cmd+Z/Cmd+X crash).
+if grep -RIn --exclude-dir=build --exclude-dir=classes --exclude-dir=target --exclude-dir=portable-data --exclude-dir=.git \
+    -e 'ObjC\.callVoid(get(handle)\.view, names\[' src 2>/dev/null; then
+  echo "FAIL: unguarded native edit selector" >&2
+  exit 1
+fi
 # Identity must be Google Chrome for the menu bar/Dock name, and the launcher
 # must run through java — no Rigel.app executable bundle.
 grep -q 'Google Chrome' src/RigelApp.java || { echo "FAIL: Rigel identity is not Google Chrome" >&2; exit 1; }

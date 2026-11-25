@@ -285,12 +285,16 @@ public final class FFMWKWebView {
     }
 
     public static int editAction(long handle, int action) {
-        // NSResponder edit actions (cut/copy/paste/undo/...). Selectors exist
-        // on NSResponder; WKWebView implements the common ones.
-        String[] names = {"undo:", "redo:", "cut:", "copy:", "paste:", "selectAll:", "delete:"};
-        if (action < 0 || action >= names.length) return 0;
-        try { ObjC.callVoid(get(handle).view, names[action]); return 1; }
-        catch (Throwable t) { return 0; }
+        // Never send NSResponder edit selectors to WKWebView from a bare java
+        // process: an unimplemented selector raises an ObjC NSException that
+        // aborts the whole JVM (no hs_err). Drive editing through JS instead,
+        // which is safe for contenteditable fields and no-ops elsewhere.
+        String[] cmds = {"undo", "redo", "cut", "copy", "paste", "selectAll", "delete"};
+        if (action < 0 || action >= cmds.length) return 0;
+        try {
+            execute(handle, "try{document.execCommand('" + cmds[action] + "');}catch(e){}");
+            return 1;
+        } catch (Throwable t) { return 0; }
     }
 
     // ── JavaScript ──────────────────────────────────────────────────────
