@@ -1083,6 +1083,7 @@ public class BrowserUI {
         addressBar = new Text(parent,
                 SWT.SEARCH | SWT.ICON_SEARCH | SWT.ICON_CANCEL);
         ui.wk.FFMWKWebView.disablePasteButtonOnSwtControl(addressBar);
+        ui.wk.FFMWKWebView.disableSearchRecentsOnSwtControl(addressBar);
         addressBar.setBackground(colAddrBg);
         addressBar.setForeground(colAddrFg);
         addressBar.setFont(fontNav);
@@ -3816,10 +3817,9 @@ public class BrowserUI {
 
     private void commitAddress() {
         String typed = addressBar == null ? "" : addressBar.getText();
-        // Address-bar completion: if history suggests a strong match for the
-        // typed text, navigate there instead of the raw input.
-        String completed = tabManager.completeAddress(typed);
-        if (completed != null && !completed.isBlank()) typed = completed;
+        // NO history/title autofill: "hi" must search Google for hi, and
+        // "chatgpt" must search Google for chatgpt — never jump to an old
+        // history entry or conversation. What you type is what you get.
         String url = resolveAddressInput(typed);
         if (url != null) {
             addressBar.setText(displayAddress(url));

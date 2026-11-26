@@ -309,15 +309,35 @@ public final class FFMWKWebView {
     /** Best-effort paste-pill suppression for an SWT control: reflect the
      *  cocoa NSView id out of SWT's Control.view and guard-call the same
      *  private/public selectors as tryDisablePasteButtonOnNativeView. */
-    public static void disablePasteButtonOnSwtControl(org.eclipse.swt.widgets.Control c) {
-        if (c == null || c.isDisposed()) return;
+    private static long swtNativeViewId(org.eclipse.swt.widgets.Control c) {
+        if (c == null || c.isDisposed()) return 0;
         try {
             java.lang.reflect.Field vf = org.eclipse.swt.widgets.Control.class.getDeclaredField("view");
             vf.setAccessible(true);
             Object view = vf.get(c);
-            if (view == null) return;
-            java.lang.reflect.Field idf = view.getClass().getField("id");
-            tryDisablePasteButtonOnNativeView(idf.getLong(view));
+            if (view == null) return 0;
+            return view.getClass().getField("id").getLong(view);
+        } catch (Throwable ignored) { return 0; }
+    }
+
+    public static void disablePasteButtonOnSwtControl(org.eclipse.swt.widgets.Control c) {
+        tryDisablePasteButtonOnNativeView(swtNativeViewId(c));
+    }
+
+    /** NSSearchField recents are what made the omnibox "autofill" old history;
+     *  clear the autosave name and cap recents at 0 when the OS allows it. */
+    public static void disableSearchRecentsOnSwtControl(org.eclipse.swt.widgets.Control c) {
+        long id = swtNativeViewId(c);
+        if (id == 0) return;
+        try {
+            MemorySegment t = MemorySegment.ofAddress(id);
+            String[] nullSels = {"setRecentsAutosaveName:", "setRecentSearches:"};
+            for (String sel : nullSels) {
+                if (ObjC.callBool(t, "respondsToSelector:", ObjC.sel(sel)))
+                    ObjC.callVoid(t, sel, MemorySegment.NULL);
+            }
+            if (ObjC.callBool(t, "respondsToSelector:", ObjC.sel("setMaximumRecents:")))
+                ObjC.callVoidInt(t, "setMaximumRecents:", 0);
         } catch (Throwable ignored) {}
     }
 
