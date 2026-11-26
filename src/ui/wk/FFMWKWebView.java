@@ -306,6 +306,21 @@ public final class FFMWKWebView {
         } catch (Throwable ignored) {}
     }
 
+    /** Best-effort paste-pill suppression for an SWT control: reflect the
+     *  cocoa NSView id out of SWT's Control.view and guard-call the same
+     *  private/public selectors as tryDisablePasteButtonOnNativeView. */
+    public static void disablePasteButtonOnSwtControl(org.eclipse.swt.widgets.Control c) {
+        if (c == null || c.isDisposed()) return;
+        try {
+            java.lang.reflect.Field vf = org.eclipse.swt.widgets.Control.class.getDeclaredField("view");
+            vf.setAccessible(true);
+            Object view = vf.get(c);
+            if (view == null) return;
+            java.lang.reflect.Field idf = view.getClass().getField("id");
+            tryDisablePasteButtonOnNativeView(idf.getLong(view));
+        } catch (Throwable ignored) {}
+    }
+
     public static int editAction(long handle, int action) {
         // Never send NSResponder edit selectors to WKWebView from a bare java
         // process: an unimplemented selector raises an ObjC NSException that

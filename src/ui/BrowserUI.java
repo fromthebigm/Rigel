@@ -1076,10 +1076,13 @@ public class BrowserUI {
         // Cocoa's native search field paints and clips the bezel, editor, focus
         // ring, and selection as one control. This avoids the square NSTextField
         // layer showing through a separately painted rounded Composite.
-        // Plain single-line bordered field, NOT SWT.SEARCH: NSSearchField is
-        // what makes macOS draw the "Paste / ⌘V" pill when the clipboard has
-        // text. A plain NSTextField does not show that affordance.
-        addressBar = new Text(parent, SWT.SINGLE | SWT.BORDER);
+        // Keep the native search-field look/behavior (bezel, icons, recents).
+        // The macOS "Paste / ⌘V" pill is suppressed separately via a guarded
+        // selector call on the underlying NSView, not by changing the field
+        // class — changing to a plain NSTextField broke the search behavior.
+        addressBar = new Text(parent,
+                SWT.SEARCH | SWT.ICON_SEARCH | SWT.ICON_CANCEL);
+        ui.wk.FFMWKWebView.disablePasteButtonOnSwtControl(addressBar);
         addressBar.setBackground(colAddrBg);
         addressBar.setForeground(colAddrFg);
         addressBar.setFont(fontNav);
@@ -4148,6 +4151,7 @@ public class BrowserUI {
         findBar.setLayout(fl);
 
         findField = new Text(findBar, SWT.SINGLE | SWT.BORDER);
+        ui.wk.FFMWKWebView.disablePasteButtonOnSwtControl(findField);
         findField.setMessage("Find in page");
         findField.setBackground(colAddrBg);
         findField.setForeground(colAddrFg);
