@@ -36,7 +36,7 @@ public final class RigelBrowser extends Composite {
     private static final java.util.concurrent.atomic.AtomicBoolean BACKEND_REPORTED =
             new java.util.concurrent.atomic.AtomicBoolean();
 
-    private static final String KEY_EDIT_SAFETY_JS =
+    static final String KEY_EDIT_SAFETY_JS =
             "document.addEventListener('keydown',function(e){"
             + "if(e.key!=='Backspace'&&e.key!=='Delete')return;"
             + "var a=document.activeElement;"

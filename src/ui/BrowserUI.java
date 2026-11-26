@@ -2736,7 +2736,12 @@ public class BrowserUI {
             return null;
         });
         browser.addProgressListener(new RigelBrowser.ProgressListener() {
-            @Override public void completed() { safeExecute(browser, DOWNLOAD_HOOK_JS); }
+            @Override public void completed() {
+                // Re-assert on every completed navigation: document-start user
+                // scripts are not guaranteed on all WK paths, but execute() is.
+                safeExecute(browser, RigelBrowser.KEY_EDIT_SAFETY_JS);
+                safeExecute(browser, DOWNLOAD_HOOK_JS);
+            }
         });
     }
 
