@@ -159,6 +159,8 @@ final class MacWKWebView extends Composite {
                     EVENT_CALLBACK, SCRIPT_CALLBACK, POLICY_CALLBACK);
             if (handle == null)
                 throw new IllegalStateException("Could not create WKWebView");
+            // Hide the macOS paste pill in the WK view when the OS exposes a switch.
+            ui.wk.FFMWKWebView.tryDisablePasteButtonOnNativeView(view.id);
         } catch (Throwable failure) {
             VIEWS.remove(token);
             if (failure instanceof RuntimeException runtime) throw runtime;

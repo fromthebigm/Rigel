@@ -157,6 +157,7 @@ public final class FFMWKWebView {
                 ObjC.callVoidBool(ua, "setSiteSpecificQuirksModeEnabled:", true);
             if (ObjC.callBool(ua, "respondsToSelector:", ObjC.sel("setTextInteractionEnabled:")))
                 ObjC.callVoidBool(ua, "setTextInteractionEnabled:", true);
+            tryDisablePasteButtonOnNativeView(ua.address());
             ObjC.callVoid(w.configuration, "setPreferences:", ua);
 
             w.contentController = ObjC.allocInit(ObjC.cls("WKUserContentController"));
@@ -176,6 +177,7 @@ public final class FFMWKWebView {
                             ValueLayout.ADDRESS, ObjC.CGRect, ValueLayout.ADDRESS));
             w.view = (MemorySegment) initView.invoke(
                     viewAlloc, ObjC.sel("initWithFrame:configuration:"), bounds, w.configuration);
+            tryDisablePasteButtonOnNativeView(w.view.address());
             if (ObjC.callBool(w.view, "respondsToSelector:", ObjC.sel("setInspectable:")))
                 ObjC.callVoidBool(w.view, "setInspectable:", true);
             ObjC.callVoid(w.view, "setNavigationDelegate:", w.controller);
@@ -282,6 +284,26 @@ public final class FFMWKWebView {
         MemorySegment w = get(handle).view;
         ObjC.callVoid(w, "window");
         ObjC.callVoid(w, "becomeFirstResponder");
+    }
+
+    /** Best-effort: ask AppKit/WebKit to hide the macOS "Paste / ⌘V" pill on a
+     *  native view if this macOS exposes a selector for it. Every call is
+     *  guarded by respondsToSelector:, so an unknown selector is a no-op and
+     *  can never ObjC-abort the JVM. */
+    public static void tryDisablePasteButtonOnNativeView(long nsViewId) {
+        if (nsViewId == 0) return;
+        String[] sels = {
+            "_setShowsPasteButton:", "setShowsPasteButton:",
+            "_setPasteButtonEnabled:", "setPasteButtonEnabled:",
+            "_setAllowsPasteButton:", "setAllowsPasteButton:"
+        };
+        try {
+            MemorySegment target = MemorySegment.ofAddress(nsViewId);
+            for (String sel : sels) {
+                if (ObjC.callBool(target, "respondsToSelector:", ObjC.sel(sel)))
+                    ObjC.callVoidBool(target, sel, false);
+            }
+        } catch (Throwable ignored) {}
     }
 
     public static int editAction(long handle, int action) {
