@@ -4066,19 +4066,12 @@ public class BrowserUI {
             if (idx >= 0 && idx < count) tabManager.switchTo(idx);
         } else if (shift && key(e, 'c')) {
             copyToClipboard(currentUrl());
-        } else if (!shift && key(e, 'c')) {
-            performEditAction(RigelBrowser.EditAction.COPY);
-        } else if (!shift && key(e, 'x')) {
-            performEditAction(RigelBrowser.EditAction.CUT);
-        } else if (!shift && key(e, 'v')) {
-            performEditAction(RigelBrowser.EditAction.PASTE);
-        } else if (!shift && key(e, 'a')) {
-            performEditAction(RigelBrowser.EditAction.SELECT_ALL);
-        } else if (!shift && key(e, 'z')) {
-            performEditAction(RigelBrowser.EditAction.UNDO);
-        } else if (shift && key(e, 'z')) {
-            performEditAction(RigelBrowser.EditAction.REDO);
         } else {
+            // Cmd+C/X/V/A/Z are intentionally NOT intercepted in the global
+            // filter: the focused SWT text widget or WKWebView (plus the menu
+            // accelerator) must own them. Intercepting Cmd+V made it run
+            // execCommand('paste') and consume the event, so the page never saw
+            // the real paste and only the macOS "Paste" pill worked.
             handled = false;
         }
 

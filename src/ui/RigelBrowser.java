@@ -283,9 +283,11 @@ public final class RigelBrowser extends Composite {
 
     public boolean performEditAction(EditAction action) {
         if (action == null || isDisposed()) return false;
-        if (backend == Backend.WKWEBVIEW) {
-            return wkWebView.performEditAction(action.nativeCode);
-        }
+        // Never route edit actions through the JNA/ObjC selector bridge from a
+        // bare java process (an unimplemented selector aborts the JVM). Use JS
+        // for both backends; the global key filter deliberately does not
+        // intercept Cmd+C/X/V/A/Z anymore, so real typing/paste reaches the
+        // page natively.
         return execute("try{document.execCommand('" + action.command + "');}catch(e){}");
     }
 

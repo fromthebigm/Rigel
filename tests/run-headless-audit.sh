@@ -34,6 +34,12 @@ if grep -RIn --exclude-dir=build --exclude-dir=classes --exclude-dir=target --ex
   echo "FAIL: unguarded native edit selector" >&2
   exit 1
 fi
+# The global key filter must not intercept edit shortcuts (that made Cmd+V a
+# no-op and forced the macOS Paste pill).
+if sed -n '/private void handleGlobalKey/,/^    }/p' src/ui/BrowserUI.java | grep -q 'performEditAction(RigelBrowser.EditAction.'; then
+  echo "FAIL: global key filter intercepts edit shortcuts" >&2
+  exit 1
+fi
 # Identity must be Google Chrome for the menu bar/Dock name, and the launcher
 # must run through java — no Rigel.app executable bundle.
 grep -q 'Google Chrome' src/RigelApp.java || { echo "FAIL: Rigel identity is not Google Chrome" >&2; exit 1; }
