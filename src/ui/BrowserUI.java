@@ -210,6 +210,7 @@ public class BrowserUI {
     private Label     findResult;
     private Listener  keyFilter;
     private int       findSearchGeneration;
+    private Menu      addressSuggestMenu;
 
     private static class DownloadRecord {
         final long time = System.currentTimeMillis();
@@ -1089,11 +1090,18 @@ public class BrowserUI {
         addressBar.setFont(fontNav);
         addressBar.setMessage("Search the web or enter a URL");
         setAccessibleName(addressBar, "Address and search");
-        addressBar.addListener(SWT.DefaultSelection, e -> commitAddress());
+        addressBar.addListener(SWT.DefaultSelection, e -> {
+            // Enter with no suggestion picked = normal search of the raw text.
+            hideAddressSuggestions();
+            commitAddress();
+        });
+        addressBar.addModifyListener(e -> {
+            if (!addressBar.isDisposed()) showAddressSuggestions(addressBar.getText());
+        });
         addressBar.addKeyListener(new org.eclipse.swt.events.KeyAdapter() {
             @Override public void keyPressed(org.eclipse.swt.events.KeyEvent e) {
                 // Alt+Down: recent-history dropdown over the address bar.
-                if (e.keyCode == SWT.ARROW_DOWN && (e.stateMask & SWT.ALT) != 0) showHistoryMenu();
+                if (e.keyCode == SWT.ARROW_DOWN && (e.stateMask & SWT.ALT) != 0) { hideAddressSuggestions(); showHistoryMenu(); }
             }
         });
         addressBar.addFocusListener(new FocusAdapter() {
@@ -1102,6 +1110,7 @@ public class BrowserUI {
             }
 
             @Override public void focusLost(FocusEvent e) {
+                hideAddressSuggestions();
                 if (!addressBar.isDisposed())
                     addressBar.setText(displayAddress(currentUrl()));
             }
@@ -3826,6 +3835,55 @@ public class BrowserUI {
             tabManager.navigate(url);
             tabManager.focusActiveBrowser();
         }
+    }
+
+    private void hideAddressSuggestions() {
+        if (addressSuggestMenu != null && !addressSuggestMenu.isDisposed()) addressSuggestMenu.dispose();
+        addressSuggestMenu = null;
+    }
+
+    /** Dropdown of history entries matching the typed text. Picking a row
+     *  navigates there; ignoring the dropdown and pressing Enter falls through
+     *  to commitAddress(), which searches the raw typed text. */
+    private void showAddressSuggestions(String typed) {
+        if (addressBar == null || addressBar.isDisposed()) return;
+        if (typed == null || typed.isBlank()) { hideAddressSuggestions(); return; }
+        String q = typed.toLowerCase();
+        java.util.List<config.History.Entry> matches = new java.util.ArrayList<>();
+        for (config.History.Entry e : historyEntries()) {
+            String hay = ((e.title == null ? "" : e.title) + " " + (e.url == null ? "" : e.url)).toLowerCase();
+            if (hay.contains(q)) matches.add(e);
+            if (matches.size() >= 8) break;
+        }
+        hideAddressSuggestions();
+        if (matches.isEmpty()) return;
+        Menu menu = new Menu(addressBar.getShell(), SWT.POP_UP);
+        menu.addListener(SWT.Hide, e -> {
+            if (menu == addressSuggestMenu) { menu.dispose(); addressSuggestMenu = null; }
+        });
+        for (config.History.Entry e : matches) {
+            String url = e.url == null ? "" : e.url;
+            String label = (e.title == null || e.title.isBlank()) ? url : e.title + "  (" + url + ")";
+            MenuItem item = new MenuItem(menu, SWT.NONE);
+            item.setText(label);
+            item.addSelectionListener(new org.eclipse.swt.events.SelectionAdapter() {
+                @Override public void widgetSelected(org.eclipse.swt.events.SelectionEvent se) {
+                    hideAddressSuggestions();
+                    if (addressBar != null && !addressBar.isDisposed()) addressBar.setText(displayAddress(url));
+                    String nav = resolveAddressInput(url);
+                    if (nav != null) {
+                        tabManager.navigate(nav);
+                        tabManager.focusActiveBrowser();
+                    }
+                }
+            });
+        }
+        addressBar.setMenu(menu);
+        org.eclipse.swt.graphics.Rectangle b = addressBar.getBounds();
+        org.eclipse.swt.graphics.Point p = addressBar.toDisplay(0, b.height);
+        menu.setLocation(p.x, p.y);
+        menu.setVisible(true);
+        addressSuggestMenu = menu;
     }
 
     /** Alt+Down on the address bar: dropdown of recent history (≤10), Enter
