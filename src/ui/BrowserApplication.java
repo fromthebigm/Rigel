@@ -22,6 +22,8 @@ public final class BrowserApplication {
     private final List<BrowserUI> windows = new ArrayList<>();
     private ProxyServer proxyServer;
     private boolean quitting;
+    private volatile boolean quitWatchdogArmed;
+    private volatile long quitRequestedAt;
     /** Last time a cookie snapshot was successfully written (main-thread
      *  autosave or clean quit). The TERM-path save must not run when one of
      *  these is fresh — see saveCookiesAtShutdown(). */
@@ -87,13 +89,29 @@ public final class BrowserApplication {
             } else {
                 openWindow(true);
             }
+            // Harness-only full-process quit smoke. No effect in normal runs.
+            String quitAfter = System.getenv("RIGEL_QUIT_AFTER_MS");
+            if (quitAfter != null) {
+                try {
+                    int delay = Math.max(0, Integer.parseInt(quitAfter));
+                    display.timerExec(delay, this::quit);
+                } catch (NumberFormatException ignored) {}
+            }
             scheduleCookieAutosave();
             while (!display.isDisposed() && !windows.isEmpty()) {
                 if (!display.readAndDispatch()) display.sleep();
             }
         } finally {
-            saveCookies();
-            if (proxyServer != null) proxyServer.stop();
+            // Never perform a synchronous WKHTTPCookieStore fetch during
+            // teardown: on the SWT thread it waits on a main-queue callback
+            // that cannot run until this same thread returns (the old 10 s
+            // beachball). The 45 s autosave is the durable snapshot.
+            CookieBridge.markShuttingDown();
+            if (proxyServer != null) proxyServer.stopImmediately();
+            if (quitRequestedAt > 0 && System.getenv("RIGEL_QUIT_AFTER_MS") != null) {
+                System.out.println("[Rigel] quit-cleanup-ms="
+                        + (System.nanoTime() - quitRequestedAt) / 1_000_000);
+            }
         }
     }
 
@@ -263,7 +281,10 @@ public final class BrowserApplication {
                     // empty window list and quit mid-drag.
                     (url, px, py) -> openWindow(false, url, px, py),
                     this::quit,
-                    () -> windows.remove(window),
+                    () -> {
+                        windows.remove(window);
+                        if (windows.isEmpty()) armQuitWatchdog();
+                    },
                     this::broadcastSharedSettings,
                     restoreSession,
                     initialUrl, x, y);
@@ -287,10 +308,34 @@ public final class BrowserApplication {
     private void quit() {
         if (quitting) return;
         quitting = true;
+        armQuitWatchdog();
         for (BrowserUI window : List.copyOf(windows)) {
-            if (window.getShell() != null && !window.getShell().isDisposed()) {
-                window.getShell().close();
+            try {
+                if (window.getShell() != null && !window.getShell().isDisposed())
+                    window.getShell().dispose();
+            } catch (Throwable failure) {
+                System.err.println("[Rigel] Window close failed: " + failure.getMessage());
             }
         }
+        // Do not dispose Display here: quit() may be running inside an SWT
+        // timer callback, and Display.dispose() nulls the timer array being
+        // iterated. Disposed windows empty `windows`, ending the run loop;
+        // RigelApp's outer finally disposes Display safely afterwards.
+    }
+
+    private void armQuitWatchdog() {
+        if (quitWatchdogArmed) return;
+        quitWatchdogArmed = true;
+        quitRequestedAt = System.nanoTime();
+        // Last-resort only: normal disposal returns long before this daemon
+        // fires. If an AppKit/WebKit teardown hangs, do not leave a zombie
+        // java process that keeps playing audio after the last window closes.
+        Thread watchdog = new Thread(() -> {
+            try { Thread.sleep(4_000); } catch (InterruptedException ignored) { return; }
+            System.err.println("[Rigel] Quit watchdog: native teardown did not return; forcing exit");
+            Runtime.getRuntime().halt(0);
+        }, "RigelQuitWatchdog");
+        watchdog.setDaemon(true);
+        watchdog.start();
     }
 }

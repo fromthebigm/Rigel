@@ -234,12 +234,19 @@ public class ProxyServer {
         }
     }
 
-    public synchronized void stop() {
+    public synchronized void stop() { stop(true); }
+
+    /** Application quit must not sit in LittleProxy's graceful two-second
+     *  drain. Tests/reconfiguration keep stop(); final process teardown uses
+     *  stopImmediately() to close channels and event loops now. */
+    public synchronized void stopImmediately() { stop(false); }
+
+    private void stop(boolean graceful) {
         if (browserProxy != null) browserProxy.close();
         HttpProxyServer running = server;
         server = null;
         if (running != null) {
-            running.stop();
+            if (graceful) running.stop(); else running.abort();
             System.out.println("[Rigel] Proxy stopped");
         }
     }

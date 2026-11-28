@@ -3,60 +3,76 @@ package ui.wk;
 import ui.objc.ObjC;
 import java.lang.foreign.*;
 import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
-/** Pure-FFM port of RigelCookieStoreFetchAll / rigel_wk_cookies_save / restore. */
+/** Pure-FFM cookie snapshot/replay bridge. Every async operation owns its
+ *  countdown and completion state; late WebKit callbacks can never complete a
+ *  newer save/restore by accident. */
 public final class CookieBridge {
 
-    private static volatile int remaining;
-    private static volatile CountDownLatch saveLatch;
-    private static volatile int saveOk;
+    private static final class SaveOperation {
+        final String path;
+        final CountDownLatch done = new CountDownLatch(1);
+        volatile int ok;
+        SaveOperation(String path) { this.path = path; }
+    }
+    private static final class RestoreOperation {
+        final AtomicInteger remaining;
+        RestoreOperation(int count) { remaining = new AtomicInteger(count); }
+    }
+
+    private static final ConcurrentLinkedQueue<SaveOperation> PENDING_SAVES = new ConcurrentLinkedQueue<>();
     private static volatile boolean shuttingDown;
+    private static volatile MemorySegment cookieSelectorTarget;
 
     public static void markShuttingDown() { shuttingDown = true; }
 
     private CookieBridge() {}
 
-    public static int save(String path) {
-        if (shuttingDown) return 0; // main queue may be gone; never block exit
-        saveLatch = new CountDownLatch(1);
-        saveOk = 0;
-        if (!dispatchMain(path)) {
-            return 0;
-        }
-        try { saveLatch.await(10, TimeUnit.SECONDS); }
+    /** Called only by the daemon autosave/shutdown worker, never by the SWT
+     *  close path. The bounded wait cannot beachball window disposal. */
+    public static synchronized int save(String path) {
+        if (shuttingDown) return 0;
+        SaveOperation operation = new SaveOperation(path);
+        if (!dispatchMain(operation)) return 0;
+        try { operation.done.await(3, TimeUnit.SECONDS); }
         catch (InterruptedException e) { Thread.currentThread().interrupt(); return 0; }
         if (System.getProperty("rigel.ffm.diag") != null)
-            System.out.println("[ffm] cookie save result=" + saveOk + " path=" + path);
-        return saveOk;
+            System.out.println("[ffm] cookie save result=" + operation.ok + " path=" + path);
+        return operation.ok;
     }
 
-    /** Runs on the main queue: fetch cookies and write the plist entirely
-     *  there, so no autoreleased WebKit object crosses a thread boundary. */
-    public static void saveOnMain(String path, MemorySegment block) {
+    /** Runs on the main queue: fetch and write entirely there, so no
+     *  autoreleased WebKit object crosses a thread boundary. */
+    private static void saveOnMain(SaveOperation operation) {
+        MemorySegment completion = null;
         try {
             MemorySegment store = cookieStore();
-            if (store == null) { saveOk = 0; saveLatch.countDown(); return; }
-            MemorySegment completion = ObjC.block(
-                    java.lang.invoke.MethodHandles.insertArguments(
+            if (store == null) { operation.done.countDown(); return; }
+            completion = ObjC.transientBlock(
+                    MethodHandles.insertArguments(
                             ObjC.staticHandle(CookieBridge.class, "saveDone",
-                                    MethodType.methodType(void.class, String.class,
+                                    MethodType.methodType(void.class, SaveOperation.class,
                                             MemorySegment.class, MemorySegment.class)),
-                            0, path),
-                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS), ObjC.GLOBAL);
+                            0, operation),
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             ObjC.callVoid(store, "getAllCookies:", completion);
         } catch (Throwable t) {
             if (System.getProperty("rigel.ffm.diag") != null) t.printStackTrace();
-            saveOk = 0;
-            saveLatch.countDown();
+            operation.ok = 0;
+            operation.done.countDown();
+            if (completion != null) ObjC.closeBlockSoon(completion);
         }
     }
 
-    public static void saveDone(String path, MemorySegment block, MemorySegment cookies) {
+    public static void saveDone(SaveOperation operation, MemorySegment block, MemorySegment cookies) {
         try {
-            if (cookies == null || cookies.address() == 0) { saveOk = 0; return; }
+            if (cookies == null || cookies.address() == 0) { operation.ok = 0; return; }
             MemorySegment entries = (MemorySegment) ObjC.sendAddress(0).invoke(
                     ObjC.cls("NSMutableArray"), ObjC.sel("array"));
             long count = ObjC.callLong(cookies, "count");
@@ -73,43 +89,34 @@ public final class CookieBridge {
                     if (props != null && props.address() != 0) {
                         ObjC.callVoid(entries, "addObject:", props);
                         ok++;
-                    } else {
-                        skipped++;
-                        if (System.getProperty("rigel.ffm.diag") != null)
-                            System.out.println("[ffm] cookie save: skipped malformed cookie at " + i);
-                    }
+                    } else skipped++;
                 } catch (Throwable one) {
-                    // One poisoned cookie must not abort the whole snapshot.
-                    skipped++;
-                    if (System.getProperty("rigel.ffm.diag") != null)
-                        System.out.println("[ffm] cookie save: skipped failed cookie at " + i + ": " + one);
+                    skipped++; // one malformed cookie must not poison the snapshot
                 }
             }
             MethodHandle write = ObjC.LINKER.downcallHandle(ObjC.MSG_SEND,
                     FunctionDescriptor.of(ValueLayout.JAVA_BOOLEAN, ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_BOOLEAN));
             boolean wrote = (boolean) write.invoke(entries, ObjC.sel("writeToFile:atomically:"),
-                    ObjC.nsString(path), true);
-            saveOk = wrote ? 1 : 0;
+                    ObjC.nsString(operation.path), true);
+            operation.ok = wrote ? 1 : 0;
             try {
-                java.nio.file.Files.writeString(java.nio.file.Path.of(path + ".manifest.json"),
+                java.nio.file.Files.writeString(java.nio.file.Path.of(operation.path + ".manifest.json"),
                         "{\"count\":" + count + ",\"ok\":" + ok + ",\"skipped\":" + skipped
                                 + ",\"wrote\":" + wrote + "}\n");
             } catch (Throwable ignored) {}
         } catch (Throwable t) {
             if (System.getProperty("rigel.ffm.diag") != null) t.printStackTrace();
-            saveOk = 0;
+            operation.ok = 0;
         } finally {
-            saveLatch.countDown();
+            operation.done.countDown();
+            ObjC.closeBlockSoon(block);
         }
     }
 
-    private static volatile String pendingSavePath;
-    private static volatile MemorySegment cookieSelectorTarget;
-
-    private static boolean dispatchMain(String path) {
+    private static boolean dispatchMain(SaveOperation operation) {
         try {
-            pendingSavePath = path;
+            PENDING_SAVES.add(operation);
             if (cookieSelectorTarget == null) {
                 MemorySegment cls = ObjC.createClass("RigelJavaCookieSaver", "NSObject");
                 ObjC.addMethod(cls, "rigelSaveCookiesNow",
@@ -118,7 +125,7 @@ public final class CookieBridge {
                         FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS), "v@:");
                 ObjC.registerClass(cls);
                 cookieSelectorTarget = ObjC.allocInit(cls);
-                ObjC.callVoid(cookieSelectorTarget, "retain");
+                ObjC.callVoid(cookieSelectorTarget, "retain"); // process-lifetime selector target
             }
             MethodHandle perform = ObjC.LINKER.downcallHandle(ObjC.MSG_SEND,
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS,
@@ -128,17 +135,20 @@ public final class CookieBridge {
                     ObjC.sel("rigelSaveCookiesNow"), MemorySegment.NULL, false);
             return true;
         } catch (Throwable t) {
-            if (System.getProperty("rigel.ffm.diag") != null)
-                System.out.println("[ffm] main-thread dispatch failed: " + t);
+            PENDING_SAVES.remove(operation);
+            operation.done.countDown();
             return false;
         }
     }
 
     public static void saveNow(MemorySegment self, MemorySegment cmd) {
-        saveOnMain(pendingSavePath, MemorySegment.NULL);
+        SaveOperation operation = PENDING_SAVES.poll();
+        if (operation == null) return;
+        if (shuttingDown) { operation.done.countDown(); return; }
+        saveOnMain(operation);
     }
 
-    public static int restore(String path) {
+    public static synchronized int restore(String path) {
         try {
             MemorySegment entries = (MemorySegment) ObjC.sendAddress(1).invoke(
                     ObjC.cls("NSArray"), ObjC.sel("arrayWithContentsOfFile:"), ObjC.nsString(path));
@@ -150,62 +160,50 @@ public final class CookieBridge {
             MemorySegment store = cookieStore();
             if (store == null) return 0;
 
-            MemorySegment blockImp = ObjC.LINKER.upcallStub(
-                    ObjC.staticHandle(CookieBridge.class, "setDone",
-                            MethodType.methodType(void.class, MemorySegment.class)),
-                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS), ObjC.GLOBAL);
-            MemorySegment completion = makeBlock(blockImp);
-
-            remaining = (int) count;
-            java.util.concurrent.atomic.AtomicInteger ok = new java.util.concurrent.atomic.AtomicInteger();
+            RestoreOperation operation = new RestoreOperation((int) count);
+            AtomicInteger accepted = new AtomicInteger();
             MethodHandle objectAt = ObjC.LINKER.downcallHandle(ObjC.MSG_SEND,
                     FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
             for (long i = 0; i < count; i++) {
+                MemorySegment doneBlock = null;
                 try {
                     MemorySegment props = (MemorySegment) objectAt.invoke(
                             entries, ObjC.sel("objectAtIndex:"), i);
                     MemorySegment cookie = (MemorySegment) ObjC.sendAddress(1).invoke(
                             ObjC.cls("NSHTTPCookie"), ObjC.sel("cookieWithProperties:"), props);
                     if (cookie == null || cookie.address() == 0) {
-                        if (System.getProperty("rigel.ffm.diag") != null)
-                            System.out.println("[ffm] cookie restore: cookieWithProperties failed at " + i);
-                        remaining--;
+                        operation.remaining.decrementAndGet();
                         continue;
                     }
-                    final long idx = i;
-                    MemorySegment doneBlock = makeBlock(ObjC.LINKER.upcallStub(
-                            ObjC.staticHandle(CookieBridge.class, "restoreDone",
-                                    MethodType.methodType(void.class, MemorySegment.class, MemorySegment.class)),
-                            FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS), ObjC.GLOBAL));
+                    doneBlock = ObjC.transientBlock(
+                            MethodHandles.insertArguments(
+                                    ObjC.staticHandle(CookieBridge.class, "restoreDone",
+                                            MethodType.methodType(void.class, RestoreOperation.class,
+                                                    MemorySegment.class, MemorySegment.class)), 0, operation),
+                            FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
                     ObjC.callVoid(store, "setCookie:completionHandler:", cookie, doneBlock);
-                    ok.incrementAndGet();
+                    accepted.incrementAndGet();
                 } catch (Throwable one) {
-                    remaining--;
-                    if (System.getProperty("rigel.ffm.diag") != null)
-                        System.out.println("[ffm] cookie restore: failed at " + i + ": " + one);
+                    operation.remaining.decrementAndGet();
+                    if (doneBlock != null) ObjC.closeBlock(doneBlock);
                 }
             }
-            long deadline = System.nanoTime() + 10_000_000_000L;
-            while (remaining > 0 && System.nanoTime() < deadline) pump(0.05);
+            long deadline = System.nanoTime() + 5_000_000_000L;
+            while (operation.remaining.get() > 0 && System.nanoTime() < deadline) pump(0.05);
             if (System.getProperty("rigel.ffm.diag") != null)
-                System.out.println("[ffm] cookie restore applied=" + ok.get() + "/" + count);
-            return ok.get();
+                System.out.println("[ffm] cookie restore accepted=" + accepted.get() + "/" + count
+                        + " pending=" + operation.remaining.get());
+            return accepted.get();
         } catch (Throwable t) {
-            if (System.getProperty("rigel.ffm.diag") != null) {
-                System.out.println("[ffm] cookie restore failed: " + t);
-                t.printStackTrace();
-            }
+            if (System.getProperty("rigel.ffm.diag") != null) t.printStackTrace();
             return 0;
         }
     }
 
-    public static void setDone(MemorySegment block) {
-        remaining--;
-    }
-
-    public static void restoreDone(MemorySegment self, MemorySegment block) {
-        remaining--;
+    public static void restoreDone(RestoreOperation operation, MemorySegment self, MemorySegment block) {
+        operation.remaining.decrementAndGet();
+        ObjC.closeBlockSoon(block);
     }
 
     private static MemorySegment cookieStore() {
@@ -216,34 +214,22 @@ public final class CookieBridge {
         } catch (Throwable t) { return null; }
     }
 
-    private static MemorySegment makeBlock(MemorySegment invoke) {
-        MemoryLayout layout = MemoryLayout.structLayout(
-                ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT,
-                ValueLayout.ADDRESS, ValueLayout.ADDRESS);
-        MemoryLayout descLayout = MemoryLayout.structLayout(
-                ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.ADDRESS, ValueLayout.ADDRESS);
-        MemorySegment isa = ObjC.LINKER.defaultLookup().find("_NSConcreteStackBlock").orElseThrow();
-        MemorySegment desc = ObjC.GLOBAL.allocate(descLayout);
-        desc.set(ValueLayout.JAVA_LONG, 8L, 32L);
-        MemorySegment b = ObjC.GLOBAL.allocate(layout);
-        b.set(ValueLayout.ADDRESS, 0L, isa);
-        b.set(ValueLayout.JAVA_INT, 8L, 0);
-        b.set(ValueLayout.ADDRESS, 16L, invoke);
-        b.set(ValueLayout.ADDRESS, 24L, desc);
-        return b;
-    }
+    private static volatile MethodHandle mainRunLoop;
+    private static volatile MethodHandle dateWith;
 
     private static void pump(double seconds) {
         try {
-            SymbolLookup appkit = SymbolLookup.libraryLookup(
-                    "/System/Library/Frameworks/AppKit.framework/AppKit", ObjC.GLOBAL);
-            MethodHandle mainRunLoop = ObjC.LINKER.downcallHandle(
-                    appkit.find("NSRunLoopMain").orElseThrow(),
-                    FunctionDescriptor.of(ValueLayout.ADDRESS));
+            if (mainRunLoop == null) {
+                SymbolLookup appkit = SymbolLookup.libraryLookup(
+                        "/System/Library/Frameworks/AppKit.framework/AppKit", ObjC.GLOBAL);
+                mainRunLoop = ObjC.LINKER.downcallHandle(
+                        appkit.find("NSRunLoopMain").orElseThrow(),
+                        FunctionDescriptor.of(ValueLayout.ADDRESS));
+                dateWith = ObjC.LINKER.downcallHandle(ObjC.MSG_SEND,
+                        FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                                ValueLayout.ADDRESS, ValueLayout.JAVA_DOUBLE));
+            }
             MemorySegment loop = (MemorySegment) mainRunLoop.invoke();
-            MethodHandle dateWith = ObjC.LINKER.downcallHandle(ObjC.MSG_SEND,
-                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS,
-                            ValueLayout.ADDRESS, ValueLayout.JAVA_DOUBLE));
             MemorySegment date = (MemorySegment) dateWith.invoke(ObjC.cls("NSDate"),
                     ObjC.sel("dateWithTimeIntervalSinceNow:"), seconds);
             ObjC.callVoid(loop, "runMode:beforeDate:", ObjC.nsString("NSDefaultRunLoopMode"), date);

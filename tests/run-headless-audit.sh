@@ -9,7 +9,7 @@ cd "$ROOT"
 ./build.sh >/tmp/rigel-headless-build.log 2>&1
 tail -3 /tmp/rigel-headless-build.log
 
-for t in tests/run-proxy-core-test.sh tests/run-config-hardening-test.sh tests/run-search-engines-test.sh; do
+for t in tests/run-proxy-core-test.sh tests/run-config-hardening-test.sh tests/run-search-engines-test.sh tests/run-objc-core-test.sh; do
   echo "[audit] $t"
   timeout 180 "$t" || { echo "FAIL: $t" >&2; exit 1; }
 done
@@ -38,6 +38,20 @@ fi
 # no-op and forced the macOS Paste pill).
 if sed -n '/private void handleGlobalKey/,/^    }/p' src/ui/BrowserUI.java | grep -q 'performEditAction(RigelBrowser.EditAction.'; then
   echo "FAIL: global key filter intercepts edit shortcuts" >&2
+  exit 1
+fi
+# Shutdown must not synchronously fetch cookies on the UI thread or defer WK
+# disposal to a later tick. Native transient blocks must not use GLOBAL.
+if sed -n '/} finally {/,/CookieBridge.markShuttingDown/p' src/ui/BrowserApplication.java | grep -q 'saveCookies()'; then
+  echo "FAIL: synchronous cookie save in application teardown" >&2
+  exit 1
+fi
+if grep -q 'asyncExec(this::disposeAndReleaseClosedWindow)' src/ui/BrowserUI.java; then
+  echo "FAIL: deferred window teardown" >&2
+  exit 1
+fi
+if grep -n 'ObjC\.block(.*ObjC.GLOBAL\|ObjC\.block($' src/ui/wk/FFMWKWebView.java src/ui/wk/CookieBridge.java | grep -q .; then
+  echo "FAIL: permanent GLOBAL completion block" >&2
   exit 1
 fi
 # Identity must be Google Chrome for the menu bar/Dock name, and the launcher

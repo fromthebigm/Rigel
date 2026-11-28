@@ -111,6 +111,14 @@ for d in "${custom_native[@]}"; do
 done
 echo "OK: no custom native binaries outside the signed JDK"
 
+# 7. run-rigel.sh launches build/classes:lib/*, so the main class must actually
+#    be present. This gates the 25.2-style runtime-only zip launch crash.
+if [[ ! -f "$ROOT/build/classes/RigelApp.class" ]]; then
+    echo "FAIL: build/classes/RigelApp.class missing (run-rigel.sh classpath cannot launch)"
+    exit 1
+fi
+echo "OK: launcher classpath contains RigelApp"
+
 # 7. No .dSYM bundles
 dsym_count=$(find "$ROOT" -name "*.dSYM" | wc -l | tr -d ' ')
 if [[ "$dsym_count" -gt 0 ]]; then

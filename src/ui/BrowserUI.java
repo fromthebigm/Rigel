@@ -309,7 +309,6 @@ public class BrowserUI {
         allocFonts(display);
         // A final SWT paint can occur while the Display tears down its native
         // views. Keep theme resources alive until that teardown is complete.
-        display.disposeExec(this::disposeUiResources);
 
         shell = new Shell(display, SWT.SHELL_TRIM);
         WindowChrome.transparentTitleBar(shell);
@@ -381,13 +380,25 @@ public class BrowserUI {
 
         bindKeys(display);
 
+        // A Close event may be vetoed by native/AppKit handlers. Rigel's own
+        // close and Quit commands must always reach real disposal.
+        shell.addListener(SWT.Close, e -> {
+            e.doit = false;
+            if (!shell.isDisposed()) shell.dispose();
+        });
         shell.addDisposeListener(e -> {
-            saveSession();
+            try { saveSession(); } catch (Throwable failure) {
+                System.err.println("[Rigel] Session save failed: " + failure.getMessage());
+            }
+            hideAddressSuggestions();
             cancelTabDrag();
-            if (keyFilter != null) display.removeFilter(SWT.KeyDown, keyFilter);
+            if (keyFilter != null && !display.isDisposed()) display.removeFilter(SWT.KeyDown, keyFilter);
+            if (tabManager != null) tabManager.shutdown();
             if (display.getData(DATA_ACTIVE_WINDOW) == this) display.setData(DATA_ACTIVE_WINDOW, null);
             Runnable closed = windowClosedAction;
-            if (!display.isDisposed()) display.asyncExec(this::disposeAndReleaseClosedWindow);
+            // Release native WK trees, dialogs, colors and fonts now. Deferring
+            // this to a later async tick left windows/tabs alive after close.
+            disposeAndReleaseClosedWindow();
             closed.run();
         });
         shell.open();
@@ -572,7 +583,8 @@ public class BrowserUI {
     }
 
     private void disposeUiResources() {
-        animateShellOut();
+        // No close animation: it only delayed disposal and kept native views
+        // alive after the user asked to quit.
         disposeColors();
         disposeFonts();
     }
@@ -5234,7 +5246,7 @@ public class BrowserUI {
 
     private void closeUtilityShells() {
         for (Shell dialog : List.copyOf(utilityShells)) {
-            if (dialog != null && !dialog.isDisposed()) dialog.close();
+            if (dialog != null && !dialog.isDisposed()) dialog.dispose();
         }
         utilityShells.clear();
     }

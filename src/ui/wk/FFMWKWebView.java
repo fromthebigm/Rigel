@@ -119,7 +119,6 @@ public final class FFMWKWebView {
             // Controller (delegate object) — dynamic subclass of NSObject with
             // all WK delegate methods implemented in Java.
             w.controller = ObjC.allocInit(delegateClass());
-            ObjC.callVoid(w.controller, "retain");
             DelegateRegistry.BY_CONTROLLER.put(w.controller.address(), w);
 
             w.configuration = ObjC.allocInit(ObjC.cls("WKWebViewConfiguration"));
@@ -159,6 +158,8 @@ public final class FFMWKWebView {
                 ObjC.callVoidBool(ua, "setTextInteractionEnabled:", true);
             tryDisablePasteButtonOnNativeView(ua.address());
             ObjC.callVoid(w.configuration, "setPreferences:", ua);
+            // WKPreferences was created with +new; the configuration retains it.
+            ObjC.callVoid(ua, "release");
 
             w.contentController = ObjC.allocInit(ObjC.cls("WKUserContentController"));
             ObjC.callVoid(w.configuration, "setUserContentController:", w.contentController);
@@ -201,7 +202,7 @@ public final class FFMWKWebView {
             }
             return handle;
         } catch (Throwable t) {
-            DelegateRegistry.BY_CONTROLLER.remove(w.controller == null ? -1 : w.controller.address());
+            tearDown(w);
             throw new RuntimeException("WKWebView create failed", t);
         }
     }
@@ -214,13 +215,56 @@ public final class FFMWKWebView {
 
     public static void destroy(long handle) {
         WebView w = HANDLES.remove(handle);
-        if (w == null) return;
+        if (w != null) tearDown(w);
+    }
+
+    /** Idempotent native teardown. Every alloc/init/new owned by this class is
+     *  released, delegates/script handlers are detached first so WebKit cannot
+     *  call back into a half-destroyed Java view, and downloads are cancelled.
+     *  Background media in other live tabs is intentionally unaffected. */
+    private static void tearDown(WebView w) {
+        if (w == null || w.destroyed) return;
         w.destroyed = true;
+        if (w.controller != null && w.controller.address() != 0)
+            DelegateRegistry.BY_CONTROLLER.remove(w.controller.address());
         try {
-            ObjC.callVoid(w.view, "removeFromSuperview");
-            ObjC.callVoid(w.controller, "release");
-        } catch (Throwable ignored) {}
-        DelegateRegistry.BY_CONTROLLER.remove(w.controller.address());
+            if (w.view != null && w.view.address() != 0) {
+                TERMINATIONS.remove(w.view.address());
+                ObjC.callVoid(w.view, "stopLoading");
+                ObjC.callVoid(w.view, "setNavigationDelegate:", MemorySegment.NULL);
+                ObjC.callVoid(w.view, "setUIDelegate:", MemorySegment.NULL);
+            }
+            if (w.contentController != null && w.contentController.address() != 0) {
+                for (String name : handlerNames())
+                    ObjC.callVoid(w.contentController, "removeScriptMessageHandlerForName:",
+                            ObjC.nsString(name));
+                ObjC.callVoid(w.contentController, "removeAllUserScripts");
+            }
+            for (MemorySegment download : w.downloads.values()) {
+                try {
+                    ObjC.callVoid(download, "setDelegate:", MemorySegment.NULL);
+                    ObjC.callVoid(download, "cancel");
+                } catch (Throwable ignored) {}
+            }
+            w.downloads.clear();
+            w.destTargets.clear();
+            if (w.view != null && w.view.address() != 0)
+                ObjC.callVoid(w.view, "removeFromSuperview");
+        } catch (Throwable ignored) {
+        } finally {
+            // alloc/init ownership: removeFromSuperview drops the parent's
+            // retain, but not our own +1 from initWithFrame:configuration:.
+            releaseOwned(w.view);
+            releaseOwned(w.contentController);
+            releaseOwned(w.configuration);
+            releaseOwned(w.controller);
+            w.events = null;
+        }
+    }
+
+    private static void releaseOwned(MemorySegment object) {
+        if (object == null || object.address() == 0) return;
+        try { ObjC.callVoid(object, "release"); } catch (Throwable ignored) {}
     }
 
     // ── navigation ──────────────────────────────────────────────────────
@@ -373,6 +417,7 @@ public final class FFMWKWebView {
                     ObjC.nsString(javascript), 0L, mainFrameOnly != 0);
             if (script == null || script.address() == 0) return 0;
             ObjC.callVoid(get(handle).contentController, "addUserScript:", script);
+            ObjC.callVoid(script, "release"); // addUserScript: retains it
             return 1;
         } catch (Throwable t) { return 0; }
     }
@@ -384,8 +429,8 @@ public final class FFMWKWebView {
                     MethodType.methodType(void.class, long.class, MemorySegment.class,
                             MemorySegment.class, MemorySegment.class));
             body = MethodHandles.insertArguments(body, 0, evalToken);
-            MemorySegment block = ObjC.block(body, FunctionDescriptor.ofVoid(
-                    ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS), ObjC.GLOBAL);
+            MemorySegment block = ObjC.transientBlock(body, FunctionDescriptor.ofVoid(
+                    ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             ObjC.callVoid(w.view, "evaluateJavaScript:completionHandler:", ObjC.nsString(javascript), block);
         } catch (Throwable t) {
             w.events.evaluated(evalToken, "", t.getMessage());
@@ -393,6 +438,7 @@ public final class FFMWKWebView {
     }
 
     public static void evalDone(long token, MemorySegment block, MemorySegment result, MemorySegment error) {
+        try {
         String value = "";
         if (result != null && result.address() != 0) {
             try {
@@ -419,6 +465,7 @@ public final class FFMWKWebView {
                             MemorySegment ns = (MemorySegment) initStr.invoke(alloc,
                                     ObjC.sel("initWithData:encoding:"), data, 4L);
                             value = ObjC.javaString(ns);
+                            releaseOwned(ns);
                         }
                     } else {
                         value = ObjC.javaString(ObjC.call0(result, "description"));
@@ -435,6 +482,7 @@ public final class FFMWKWebView {
         for (WebView w : HANDLES.values()) {
             if (w.events != null) w.events.evaluated(token, value, err);
         }
+        } finally { ObjC.closeBlockSoon(block); }
     }
 
     // ── proxy / content blocking / cookies ──────────────────────────────
@@ -587,8 +635,10 @@ public final class FFMWKWebView {
             MemorySegment script = (MemorySegment) init.invoke(alloc,
                     ObjC.sel("initWithSource:injectionTime:forMainFrameOnly:"),
                     ObjC.nsString(source), 0L, false);
-            if (script != null && script.address() != 0)
+            if (script != null && script.address() != 0) {
                 ObjC.callVoid(w.contentController, "addUserScript:", script);
+                ObjC.callVoid(script, "release"); // addUserScript: retains it
+            }
         } catch (Throwable ignored) {}
     }
 
@@ -613,21 +663,15 @@ public final class FFMWKWebView {
             int generation = w.contentRuleGeneration.incrementAndGet();
             MemorySegment store = (MemorySegment) ObjC.sendAddress(0).invoke(
                     ObjC.cls("WKContentRuleListStore"), ObjC.sel("defaultStore"));
-            MemorySegment block = ObjC.block(
-                    ObjC.staticHandle(FFMWKWebView.class, "contentRulesCompiled",
-                            MethodType.methodType(void.class, int.class, MemorySegment.class,
-                                    MemorySegment.class, MemorySegment.class)),
-                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS,
-                            ValueLayout.ADDRESS), ObjC.GLOBAL);
             // Bind generation and view token into the upcall.
             java.lang.invoke.MethodHandle bound = java.lang.invoke.MethodHandles.insertArguments(
                     ObjC.staticHandle(FFMWKWebView.class, "contentRulesCompiled",
                             MethodType.methodType(void.class, int.class, long.class,
                                     MemorySegment.class, MemorySegment.class, MemorySegment.class)),
                     0, generation, w.token);
-            MemorySegment boundBlock = ObjC.block(bound,
+            MemorySegment boundBlock = ObjC.transientBlock(bound,
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS,
-                            ValueLayout.ADDRESS), ObjC.GLOBAL);
+                            ValueLayout.ADDRESS));
             ObjC.callVoid(store, "compileContentRuleListForIdentifier:encodedContentRuleList:completionHandler:",
                     ObjC.nsString("com.rigel.builtin-content-blocker.v1"),
                     ObjC.nsString(CONTENT_RULES_JSON), boundBlock);
@@ -637,13 +681,15 @@ public final class FFMWKWebView {
     public static void contentRulesCompiled(int generation, long token,
                                             MemorySegment block, MemorySegment ruleList,
                                             MemorySegment error) {
-        WebView w = HANDLES.values().stream().filter(v -> v.token == token).findFirst().orElse(null);
-        if (w == null || w.contentBlocking == 0 || w.contentRuleGeneration.get() != generation
-                || w.destroyed || ruleList == null || ruleList.address() == 0) return;
         try {
-            ObjC.callVoid(w.contentController, "addContentRuleList:", ruleList);
-            ObjC.callVoid(w.view, "reload");
-        } catch (Throwable ignored) {}
+            WebView w = HANDLES.values().stream().filter(v -> v.token == token).findFirst().orElse(null);
+            if (w == null || w.contentBlocking == 0 || w.contentRuleGeneration.get() != generation
+                    || w.destroyed || ruleList == null || ruleList.address() == 0) return;
+            try {
+                ObjC.callVoid(w.contentController, "addContentRuleList:", ruleList);
+                ObjC.callVoid(w.view, "reload");
+            } catch (Throwable ignored) {}
+        } finally { ObjC.closeBlockSoon(block); }
     }
 
     private static final String CONTENT_RULES_JSON = buildContentRules();
@@ -724,26 +770,29 @@ public final class FFMWKWebView {
                     ObjC.staticHandle(FFMWKWebView.class, "snapshotDone",
                             MethodType.methodType(void.class, String.class, MemorySegment.class,
                                     MemorySegment.class)), 0, path);
-            MemorySegment boundBlock = ObjC.block(bound,
+            MemorySegment boundBlock = ObjC.transientBlock(bound,
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS,
-                            ValueLayout.ADDRESS), ObjC.GLOBAL);
+                            ValueLayout.ADDRESS));
             ObjC.callVoid(get(handle).view, "takeSnapshotWithConfiguration:completionHandler:",
                     config, boundBlock);
+            ObjC.callVoid(config, "release");
             return 1;
         } catch (Throwable t) { return 0; }
     }
 
     public static void snapshotDone(String path, MemorySegment block, MemorySegment image) {
-        if (image == null || image.address() == 0) return;
         try {
-            MemorySegment tiff = (MemorySegment) ObjC.sendAddress(0).invoke(image, ObjC.sel("TIFFRepresentation"));
-            MemorySegment rep = (MemorySegment) ObjC.sendAddress(1).invoke(
-                    ObjC.cls("NSBitmapImageRep"), ObjC.sel("imageRepWithData:"), tiff);
-            MemorySegment png = (MemorySegment) ObjC.sendAddress(2).invoke(rep,
-                    ObjC.sel("representationUsingType:properties:"), MemorySegment.ofAddress(4),
-                    ObjC.sendAddress(0).invoke(ObjC.cls("NSDictionary"), ObjC.sel("dictionary")));
-            ObjC.callVoidPathBool(png, "writeToFile:atomically:", ObjC.nsString(path), true);
-        } catch (Throwable ignored) {}
+            if (image == null || image.address() == 0) return;
+            try {
+                MemorySegment tiff = (MemorySegment) ObjC.sendAddress(0).invoke(image, ObjC.sel("TIFFRepresentation"));
+                MemorySegment rep = (MemorySegment) ObjC.sendAddress(1).invoke(
+                        ObjC.cls("NSBitmapImageRep"), ObjC.sel("imageRepWithData:"), tiff);
+                MemorySegment png = (MemorySegment) ObjC.sendAddress(2).invoke(rep,
+                        ObjC.sel("representationUsingType:properties:"), MemorySegment.ofAddress(4),
+                        ObjC.sendAddress(0).invoke(ObjC.cls("NSDictionary"), ObjC.sel("dictionary")));
+                ObjC.callVoidPathBool(png, "writeToFile:atomically:", ObjC.nsString(path), true);
+            } catch (Throwable ignored) {}
+        } finally { ObjC.closeBlockSoon(block); }
     }
 
     public static long webkitMemoryBytes() {
@@ -944,7 +993,7 @@ public final class FFMWKWebView {
         }
         // Call the decision block with WKNavigationActionPolicyAllow=1 / Cancel=0.
         try {
-            MemorySegment invokePtr = decisionBlock.reinterpret(32).get(ValueLayout.ADDRESS, 16L);
+            MemorySegment invokePtr = ObjC.blockInvoke(decisionBlock);
             MethodHandle invoke = ObjC.LINKER.downcallHandle(invokePtr,
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
             invoke.invoke(decisionBlock, allow ? 1L : 0L);
@@ -968,9 +1017,9 @@ public final class FFMWKWebView {
                     ObjC.staticHandle(FFMWKWebView.class, "downloadStarted",
                             MethodType.methodType(void.class, long.class, MemorySegment.class,
                                     MemorySegment.class, MemorySegment.class)), 0, w.token);
-            MemorySegment block = ObjC.block(boundStart,
+            MemorySegment block = ObjC.transientBlock(boundStart,
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS,
-                            ValueLayout.ADDRESS), ObjC.GLOBAL);
+                            ValueLayout.ADDRESS));
             ObjC.callVoid(w.view, "startDownloadUsingRequest:completionHandler:", request, block);
         } catch (Throwable ignored) {}
     }
@@ -993,7 +1042,7 @@ public final class FFMWKWebView {
             if (result != 1 || urls == null || urls.address() == 0) urls = ObjC.call0(
                     (MemorySegment) ObjC.sendAddress(0).invoke(ObjC.cls("NSArray"), ObjC.sel("array")),
                     "self");
-            MemorySegment invokePtr = completion.reinterpret(32).get(ValueLayout.ADDRESS, 16L);
+            MemorySegment invokePtr = ObjC.blockInvoke(completion);
             MethodHandle invoke = ObjC.LINKER.downcallHandle(invokePtr,
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             invoke.invoke(completion, urls);
@@ -1001,7 +1050,7 @@ public final class FFMWKWebView {
             // Never leave a file chooser completion uncalled — WebKit throws
             // an internal exception if it never receives the callback.
             try {
-                MemorySegment invokePtr = completion.reinterpret(32).get(ValueLayout.ADDRESS, 16L);
+                MemorySegment invokePtr = ObjC.blockInvoke(completion);
                 MethodHandle invoke = ObjC.LINKER.downcallHandle(invokePtr,
                         FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
                 invoke.invoke(completion, MemorySegment.NULL);
@@ -1069,18 +1118,18 @@ public final class FFMWKWebView {
             if (history.size() <= 3) {
                 long delay = 250L * (1L << Math.min(2, history.size() - 1));
                 final long target = webView.address();
-                Thread t = new Thread(() -> {
+                // WKWebView is main-thread-only. A raw sleeping Java thread used
+                // to call reload off-thread; use the SWT/AppKit event loop.
+                org.eclipse.swt.widgets.Display display = org.eclipse.swt.widgets.Display.getDefault();
+                if (!display.isDisposed()) display.timerExec((int) delay, () -> {
                     try {
-                        Thread.sleep(delay);
                         WebView current = HANDLES.values().stream()
                                 .filter(v -> v.view != null && v.view.address() == target)
                                 .findFirst().orElse(null);
                         if (current != null && !current.destroyed)
                             ObjC.callVoid(current.view, "reload");
                     } catch (Throwable ignored) {}
-                }, "rigel-termination-reload");
-                t.setDaemon(true);
-                t.start();
+                });
             } else {
                 w.events.event(w.token, 3, url, "Web content process repeatedly crashed; automatic reload stopped");
             }
@@ -1145,23 +1194,14 @@ public final class FFMWKWebView {
         } catch (Throwable t) { System.err.println("[ffm] JS text input failed: " + t); }
     }
 
-    /** AVCaptureDevice + user decisionBlock. On the WK thread we block in a
-     *  small poll loop waiting for the authorization state to settle; the
-     *  decision is then invoked as Allow(1)/Deny(0)/Timeout(2). */
+    /** AVCaptureDevice + user decisionBlock. Never sleep on the WK/AppKit
+     *  thread: notDetermined is allowed through to macOS's own capture prompt,
+     *  and explicitly denied/restricted camera+mic is denied immediately. */
     public static void requestMediaCapture(MemorySegment self, MemorySegment cmd,
                                            MemorySegment origin, MemorySegment decisionBlock) {
         try {
             MemorySegment videoType = ObjC.nsString("vide");
             MemorySegment audioType = ObjC.nsString("soun");
-            long deadline = System.currentTimeMillis() + 5_000;
-            while (ObjC.callInt(ObjC.cls("AVCaptureDevice"), "authorizationStatusForMediaType:", videoType) == 0
-                    && System.currentTimeMillis() < deadline) {
-                Thread.sleep(50);
-            }
-            while (ObjC.callInt(ObjC.cls("AVCaptureDevice"), "authorizationStatusForMediaType:", audioType) == 0
-                    && System.currentTimeMillis() < deadline) {
-                Thread.sleep(50);
-            }
             int videoStatus = ObjC.callInt(ObjC.cls("AVCaptureDevice"), "authorizationStatusForMediaType:", videoType);
             int audioStatus = ObjC.callInt(ObjC.cls("AVCaptureDevice"), "authorizationStatusForMediaType:", audioType);
             // AVAuthorizationStatus: 0 notDetermined, 1 restricted, 2 denied, 3 authorized.
@@ -1211,25 +1251,27 @@ public final class FFMWKWebView {
     }
 
     private static MemorySegment invokePtr(MemorySegment block) {
-        return block.reinterpret(32).get(ValueLayout.ADDRESS, 16L);
+        return ObjC.blockInvoke(block);
     }
 
     public static void downloadStarted(long token, MemorySegment block,
                                        MemorySegment download, MemorySegment error) {
-        WebView w = HANDLES.values().stream().filter(v -> v.token == token).findFirst().orElse(null);
-        if (w == null) return;
-        if (download != null && download.address() != 0) {
-            String id = "dl-" + w.downloadSeq.incrementAndGet();
-            w.downloads.put(id, download);
-            ObjC.callVoid(download, "setDelegate:", w.controller);
-            if (w.events != null)
+        try {
+            WebView w = HANDLES.values().stream().filter(v -> v.token == token).findFirst().orElse(null);
+            if (w == null || w.destroyed) return;
+            if (download != null && download.address() != 0) {
+                String id = "dl-" + w.downloadSeq.incrementAndGet();
+                w.downloads.put(id, download);
+                ObjC.callVoid(download, "setDelegate:", w.controller);
+                if (w.events != null)
+                    w.events.script(w.token, "rigelDownloadEvent",
+                            downloadPayload(w, "started", id, download, ""));
+                startProgressPoller(w, id, download);
+            } else if (w.events != null) {
                 w.events.script(w.token, "rigelDownloadEvent",
-                        downloadPayload(w, "started", id, download, ""));
-            startProgressPoller(w, id, download);
-        } else if (w.events != null) {
-            w.events.script(w.token, "rigelDownloadEvent",
-                    payload("failed", "", "", "", "", "0", "0", ObjC.javaString(error)));
-        }
+                        payload("failed", "", "", "", "", "0", "0", ObjC.javaString(error)));
+            }
+        } finally { ObjC.closeBlockSoon(block); }
     }
 
     private static String downloadPayload(WebView w, String event, String id,
@@ -1262,22 +1304,20 @@ public final class FFMWKWebView {
     }
 
     private static void startProgressPoller(WebView w, String id, MemorySegment download) {
-        Thread t = new Thread(() -> {
-            while (!w.destroyed && w.downloads.containsKey(id)) {
-                try {
-                    MemorySegment progress = ObjC.call0(download, "progress");
-                    if (progress != null && progress.address() != 0) {
-                        double fraction = ObjC.callDouble(progress, "fractionCompleted");
-                        if (w.events != null)
-                            w.events.script(w.token, "rigelDownloadEvent",
-                                    downloadPayload(w, "progress", id, download, ""));
-                    }
-                    Thread.sleep(500);
-                } catch (Throwable ignored) { break; }
-            }
-        }, "rigel-download-progress");
-        t.setDaemon(true);
-        t.start();
+        org.eclipse.swt.widgets.Display display = org.eclipse.swt.widgets.Display.getDefault();
+        if (display.isDisposed()) return;
+        Runnable[] poll = new Runnable[1];
+        poll[0] = () -> {
+            if (display.isDisposed() || w.destroyed || !w.downloads.containsKey(id)) return;
+            try {
+                MemorySegment progress = ObjC.call0(download, "progress");
+                if (progress != null && progress.address() != 0 && w.events != null)
+                    w.events.script(w.token, "rigelDownloadEvent",
+                            downloadPayload(w, "progress", id, download, ""));
+                display.timerExec(500, poll[0]);
+            } catch (Throwable ignored) {}
+        };
+        display.timerExec(500, poll[0]);
     }
 
     private static String downloadId(WebView fallback, MemorySegment download) {

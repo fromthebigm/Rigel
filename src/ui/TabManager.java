@@ -1450,6 +1450,7 @@ public class TabManager {
         this.contentArea = contentArea;
         this.stackLayout = stackLayout;
         this.ui          = ui;
+        contentArea.addDisposeListener(e -> shutdown());
         startGamepadPolling();
         // Cheap 60s housekeeping tick; all real work happens off-tick in
         // evaluateAsync callbacks, only for tabs past the idle threshold.
@@ -1671,6 +1672,16 @@ public class TabManager {
         if (gameControllerEnabled) active().ifPresent(this::pushGamepads);
     }
 
+    /** Stop all per-window executors/timer chains exactly once on disposal. */
+    public void shutdown() {
+        if (shutdown) return;
+        shutdown = true;
+        focusGeneration++;
+        gamepadPollingStarted = false;
+        gamepadPollArmed = false;
+        tabSleepSweeper.shutdownNow();
+    }
+
     public void setAppActive(boolean active) {
         appActive = active;
         if (!active) focusGeneration++;
@@ -1733,7 +1744,13 @@ public class TabManager {
         rememberClosed(tabs.get(idx));
 
         if (tabs.size() == 1) {
-            ui.getShell().close();
+            // close() is vetoable and previously left the sole tab's WKWebView
+            // alive. Dispose the shell; its dispose listener saves the session
+            // before child tabs are torn down.
+            org.eclipse.swt.widgets.Shell window = ui.getShell();
+            if (window != null && !window.isDisposed()) window.dispose();
+            tabs.clear();
+            activeIndex = -1;
             return;
         }
 

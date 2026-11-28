@@ -42,6 +42,9 @@ public final class ObjC {
     private static final MethodHandle ADD_PROTOCOL = down(OBJC, "class_addProtocol",
             FunctionDescriptor.of(ValueLayout.JAVA_BOOLEAN, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
     public static final MemorySegment MSG_SEND = OBJC.find("objc_msgSend").orElseThrow();
+    private static final MethodHandle STRLEN = LINKER.downcallHandle(
+            LINKER.defaultLookup().find("strlen").orElseThrow(),
+            FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.ADDRESS));
 
     private ObjC() {}
 
@@ -243,7 +246,9 @@ public final class ObjC {
         try {
             MemorySegment utf8 = (MemorySegment) sendAddress(0).invoke(nsString, sel("UTF8String"));
             if (utf8 == null || utf8.address() == 0) return "";
-            return utf8.reinterpret(1 << 20).getString(0);
+            long length = (long) STRLEN.invoke(utf8);
+            if (length < 0 || length > 16 * 1024 * 1024) return "";
+            return utf8.reinterpret(length + 1).getString(0);
         } catch (Throwable t) { return ""; }
     }
 
@@ -267,18 +272,63 @@ public final class ObjC {
             ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.ADDRESS, ValueLayout.ADDRESS);
     private static final MemorySegment STACK_BLOCK_ISA = LINKER.defaultLookup()
             .find("_NSConcreteStackBlock").orElseThrow();
+    private static final long BLOCK_INVOKE_OFFSET = BLOCK.byteOffset(
+            MemoryLayout.PathElement.groupElement(3));
+    private static final Map<Long, Arena> TRANSIENT_BLOCKS = new ConcurrentHashMap<>();
 
-    /** Create a stack Objective-C block whose invoke is a Java upcall stub. */
+    /** Create a stack Objective-C block whose invoke is a Java upcall stub.
+     *  Non-GLOBAL owners are tracked so completion handlers can release their
+     *  upcall stub and block storage instead of leaking one Arena per call. */
     public static MemorySegment block(MethodHandle body, FunctionDescriptor signature, Arena owner) {
         MemorySegment imp = LINKER.upcallStub(body, signature, owner);
         MemorySegment desc = owner.allocate(BLOCK_DESC);
-        desc.set(ValueLayout.JAVA_LONG, 8L, 32L); // sizeof block
+        desc.set(ValueLayout.JAVA_LONG, 8L, BLOCK.byteSize());
         MemorySegment b = owner.allocate(BLOCK);
         b.set(ValueLayout.ADDRESS, 0L, STACK_BLOCK_ISA);
         b.set(ValueLayout.JAVA_INT, 8L, 0);
-        b.set(ValueLayout.ADDRESS, 16L, imp);
+        b.set(ValueLayout.ADDRESS, BLOCK_INVOKE_OFFSET, imp);
         b.set(ValueLayout.ADDRESS, 24L, desc);
+        // Native code may copy the stack block, changing the block address but
+        // not the invoke stub. Key by the stub so either address can release it.
+        if (owner != GLOBAL) TRANSIENT_BLOCKS.put(imp.address(), owner);
         return b;
+    }
+
+    /** A completion-scoped block; call closeBlock(block) from its callback. */
+    public static MemorySegment transientBlock(MethodHandle body, FunctionDescriptor signature) {
+        return block(body, signature, Arena.ofShared());
+    }
+
+    /** Block literal layout is stable on 64-bit macOS; centralize the offset
+     *  rather than scattering reinterpret(32)/offset-16 reads through WebKit. */
+    public static MemorySegment blockInvoke(MemorySegment block) {
+        if (block == null || block.address() == 0)
+            throw new IllegalArgumentException("null Objective-C block");
+        return block.reinterpret(BLOCK.byteSize()).get(ValueLayout.ADDRESS, BLOCK_INVOKE_OFFSET);
+    }
+
+    /** Release a transient completion block after its native call has returned. */
+    public static void closeBlock(MemorySegment block) {
+        if (block == null || block.address() == 0) return;
+        try {
+            long invoke = blockInvoke(block).address();
+            Arena owner = TRANSIENT_BLOCKS.remove(invoke);
+            if (owner != null) owner.close();
+        } catch (Throwable ignored) {}
+    }
+
+    /** Upcall stubs must not be freed while their own native callback is still
+     *  on the stack. Queue release for the next SWT turn when possible. */
+    public static void closeBlockSoon(MemorySegment block) {
+        try {
+            org.eclipse.swt.widgets.Display display = org.eclipse.swt.widgets.Display
+                    .findDisplay(Thread.currentThread());
+            if (display != null && !display.isDisposed()) {
+                display.asyncExec(() -> closeBlock(block));
+                return;
+            }
+        } catch (Throwable ignored) {}
+        closeBlock(block);
     }
 
     // ── dynamic classes (delegates) ─────────────────────────────────────
